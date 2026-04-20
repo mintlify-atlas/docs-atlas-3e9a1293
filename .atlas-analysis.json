@@ -1,0 +1,132 @@
+{
+  "projectType": "saas",
+  "projectName": "RemoteTerm for MeshCore",
+  "projectDescription": "A self-hosted web application that connects to MeshCore mesh radios via Serial, TCP, or BLE, providing a browser-based interface for messaging, packet capture, bots, MQTT forwarding, and network visualization.",
+  "theme": "luma",
+  "primaryColor": "#040404",
+  "lightColor": "#d4fb65",
+  "darkColor": "#33183b",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation/docker",
+              "installation/aur"
+            ]
+          },
+          {
+            "group": "Configuration",
+            "pages": [
+              "configuration/environment-variables",
+              "configuration/radio-connection",
+              "configuration/https-and-security"
+            ]
+          },
+          {
+            "group": "Features",
+            "pages": [
+              "features/messaging",
+              "features/packet-capture",
+              "features/bots",
+              "features/network-visualization"
+            ]
+          },
+          {
+            "group": "Integrations",
+            "pages": [
+              "integrations/mqtt",
+              "integrations/home-assistant",
+              "integrations/webhooks-and-notifications"
+            ]
+          },
+          {
+            "group": "Operations",
+            "pages": [
+              "operations/advanced-setup",
+              "operations/troubleshooting",
+              "operations/web-push"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "api-reference/overview",
+              "api-reference/websocket-events"
+            ]
+          },
+          {
+            "group": "Endpoints",
+            "pages": [
+              "api-reference/radio",
+              "api-reference/contacts",
+              "api-reference/channels",
+              "api-reference/messages",
+              "api-reference/fanout",
+              "api-reference/settings"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Connect to MeshCore radios via Serial, TCP, or BLE",
+    "Send and receive direct messages and channel messages in a browser UI",
+    "Store-and-decrypt: cache all received packets and decrypt as keys are added",
+    "Python bot system for automated message analysis and responses",
+    "MQTT forwarding to private brokers, community mesh, and Home Assistant",
+    "WebGPU-accelerated channel key brute-force cracker",
+    "Network visualization via map view and force-directed topology graph",
+    "Repeater telemetry monitoring and remote CLI management",
+    "Web Push notifications for incoming messages (requires HTTPS)",
+    "Fanout integrations: MQTT, webhooks, Apprise, Amazon SQS",
+    "Store contacts and channels beyond radio hardware limits",
+    "Systemd service and Docker deployment support"
+  ],
+  "publicApiSurface": [
+    "GET /api/health",
+    "GET /api/radio/config",
+    "PATCH /api/radio/config",
+    "POST /api/radio/advertise",
+    "POST /api/radio/discover",
+    "POST /api/radio/reboot",
+    "GET /api/contacts",
+    "POST /api/contacts",
+    "DELETE /api/contacts/{public_key}",
+    "POST /api/contacts/{public_key}/command",
+    "POST /api/contacts/{public_key}/routing-override",
+    "POST /api/contacts/{public_key}/path-discovery",
+    "GET /api/channels",
+    "POST /api/channels",
+    "DELETE /api/channels/{key}",
+    "GET /api/messages",
+    "POST /api/messages/direct",
+    "POST /api/messages/channel",
+    "POST /api/messages/channel/{message_id}/resend",
+    "GET /api/packets/undecrypted/count",
+    "POST /api/packets/decrypt/historical",
+    "GET /api/read-state/unreads",
+    "POST /api/read-state/mark-all-read",
+    "GET /api/settings",
+    "PATCH /api/settings",
+    "GET /api/fanout",
+    "POST /api/fanout",
+    "PATCH /api/fanout/{id}",
+    "DELETE /api/fanout/{id}",
+    "GET /api/statistics",
+    "GET /api/push/vapid-public-key",
+    "POST /api/push/subscribe",
+    "WS /api/ws"
+  ]
+}

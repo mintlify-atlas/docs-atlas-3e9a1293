@@ -1,0 +1,150 @@
+---
+title: "Run RemoteTerm with Docker Compose and serial passthrough"
+description: "Deploy RemoteTerm via Docker Compose using the published Hub image or a local build, with rootful Docker for reliable serial device access."
+---
+
+RemoteTerm ships a Docker image and an example Compose file so you can run the full stack in a container. Docker is convenient for setups where you want process isolation or are already managing other services with Compose. For serial-device passthrough, however, you must use rootful Docker — and serial reliability is generally better with the [native install](/quickstart) on Linux.
+
+<Warning>
+  Docker has had reports of intermittent issues with serial event subscriptions on some Linux systems. If you experience missed packets or unreliable serial connections, the [native source install](/quickstart) is the more reliable choice.
+</Warning>
+
+## Set up the Compose file
+
+<Steps>
+  <Step title="Create your docker-compose.yml">
+    You need a local `docker-compose.yml` that is customized for your transport and environment. Create it in one of two ways:
+
+    **Option A — copy and edit by hand:**
+
+    ```bash
+    cp docker-compose.example.yml docker-compose.yml
+    ```
+
+    Then open `docker-compose.yml` in your editor and configure your transport environment variables.
+
+    **Option B — use the interactive setup script:**
+
+    ```bash
+    bash scripts/setup/install_docker.sh
+    ```
+
+    The interactive script walks you through transport selection, BLE settings, and TLS configuration. It generates a ready-to-use `docker-compose.yml` for you.
+
+    Your local `docker-compose.yml` is gitignored, so future `git pull` runs will not overwrite your settings.
+
+    <Note>
+      The interactive setup script enables a self-signed (snakeoil) TLS certificate by default. If you accept the default, the app is served over HTTPS and the generated Compose file includes certificate mounts and an SSL command override. Decline if you prefer plain HTTP or plan to terminate TLS at a reverse proxy.
+    </Note>
+  </Step>
+
+  <Step title="Choose your image source">
+    The example file and setup script default to the published Docker Hub image:
+
+    ```yaml
+    services:
+      remoteterm:
+        image: docker.io/jkingsman/remoteterm-meshcore:latest
+    ```
+
+    To build locally from your checkout instead, replace the `image:` line with a build directive:
+
+    ```yaml
+    services:
+      remoteterm:
+        build: .
+    ```
+
+    Use the published image for most setups. Use a local build only when you need to test local code changes.
+  </Step>
+
+  <Step title="Start the stack">
+    Launch the container. Use `sudo` unless your Docker daemon is already configured for rootful access:
+
+    ```bash
+    sudo docker compose up
+    ```
+
+    Add `-d` to run in the background once you have confirmed the stack is working:
+
+    ```bash
+    sudo docker compose up -d
+    ```
+
+    <Warning>
+      Serial-device passthrough requires rootful Docker. Rootless Docker fails on serial-device mappings even when the Compose file is correct. Always start the stack with `sudo docker compose ...` for serial connections.
+    </Warning>
+  </Step>
+
+  <Step title="Access the interface">
+    Once the container is running, open [http://localhost:8000](http://localhost:8000) in your browser. If you accepted TLS during the interactive setup, open [https://localhost:8000](https://localhost:8000) instead and accept the self-signed certificate warning in your browser.
+  </Step>
+</Steps>
+
+## Architecture notes
+
+### Serial passthrough
+
+The container runs as root by default to maximize serial passthrough compatibility across host configurations. On Linux, if you switch between native and Docker runs, the `./data` directory can end up root-owned. If you do not need serial compatibility, you can enable the optional `user: "${UID:-1000}:${GID:-1000}"` line in `docker-compose.yml` to keep ownership aligned with your host user.
+
+### Database storage
+
+The SQLite database is stored in `./data/` on the host (bind-mounted into the container). This means the native app and Docker share the same database if run from the same directory — you can switch between the two without losing data.
+
+### ARM64 and Apple Silicon
+
+Local Docker builds are architecture-native by default. On Apple Silicon Macs and ARM64 Linux hosts such as Raspberry Pi, `docker compose build` produces an ARM64 image. To build for a different architecture, add a platform override to your Compose file.
+
+### BLE via Docker
+
+<Note>
+  BLE access from Docker requires manual Compose customization, including Bluetooth passthrough and possibly privileged mode or host networking. If you want the simpler BLE path, use the [native source install](/quickstart) instead.
+</Note>
+
+## Managing the stack
+
+### Update to the latest image
+
+Pull the latest published image and restart:
+
+```bash
+sudo docker compose pull
+sudo docker compose up -d
+```
+
+If you switched to a local build (`build: .` instead of `image:`), use the `--build` flag instead — `pull` only fetches remote images:
+
+```bash
+sudo docker compose up -d --build
+```
+
+### Stop the stack
+
+```bash
+sudo docker compose down
+```
+
+## TLS configuration
+
+The interactive setup script (`bash scripts/setup/install_docker.sh`) enables a self-signed TLS certificate by default. If you accepted TLS during setup, your generated Compose file includes certificate volume mounts and a command override similar to this:
+
+```yaml
+services:
+  remoteterm:
+    image: docker.io/jkingsman/remoteterm-meshcore:latest
+    volumes:
+      - ./data:/app/data
+      - ./cert.pem:/app/cert.pem:ro
+      - ./key.pem:/app/key.pem:ro
+    command: >
+      uv run uvicorn app.main:app
+      --host 0.0.0.0 --port 8000
+      --ssl-keyfile=/app/key.pem
+      --ssl-certfile=/app/cert.pem
+```
+
+If you opted out of TLS during setup, the app is served over plain HTTP. You can add HTTPS later by generating a certificate and editing `docker-compose.yml` to add the volume mounts and command override above.
+
+<Note>
+  WebGPU channel-key cracking requires a secure context when you are not on `localhost`. Enable HTTPS if you plan to access RemoteTerm from another machine and want to use the channel key cracker.
+</Note>

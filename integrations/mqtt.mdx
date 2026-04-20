@@ -1,0 +1,146 @@
+---
+title: "MQTT integration: private broker and community forwarding"
+description: "Configure private MQTT forwarding for decoded messages and raw packets, or connect to community MQTT infrastructure for raw packet publishing."
+---
+
+RemoteTerm's fanout bus can forward mesh events to external MQTT brokers in real time. Two integration types are available: **Private MQTT** for your own broker with full control over what gets published, and **Community MQTT** for contributing raw packet data to the shared mesh monitoring network.
+
+## Private MQTT
+
+Private MQTT publishes decoded messages, raw RF packets, or both to a broker you control. Go to **Settings > Integrations > Add > Private MQTT** to create an instance.
+
+### Configuration fields
+
+| Field | Type | Description |
+|---|---|---|
+| `broker_host` | string | MQTT broker hostname or IP address |
+| `broker_port` | integer | Broker port (default: `1883`) |
+| `username` | string | Optional broker username |
+| `password` | string | Optional broker password |
+| `use_tls` | boolean | Enable TLS for the broker connection |
+| `tls_insecure` | boolean | Skip TLS certificate verification (not recommended in production) |
+| `topic_prefix` | string | Prefix applied to all published topics (default: `meshcore`) |
+
+### Scope
+
+The scope selector controls which events are forwarded:
+
+- **Messages scope**: choose `all` messages, `only` messages from specific channels or contacts, or `except` for specific channels or contacts.
+- **Raw packets**: toggle on or off independently of the message scope.
+
+You can forward messages only, raw packets only, or both at the same time.
+
+### Published topics
+
+Decoded messages publish to `<topic_prefix>/message/<conversation_key>` and raw packets publish to `<topic_prefix>/raw/<packet_id>`.
+
+## Community MQTT
+
+Community MQTT connects RemoteTerm to shared mesh monitoring infrastructure. Go to **Settings > Integrations > Add > Community MQTT** to create an instance.
+
+### Configuration fields
+
+| Field | Type | Description |
+|---|---|---|
+| `broker_host` | string | Community broker hostname |
+| `broker_port` | integer | Broker port |
+| `iata` | string | Three-letter IATA airport code identifying your location (e.g., `SFO`) |
+| `email` | string | Contact email for the community network |
+
+Community MQTT **only publishes raw packets**. Decoded message content is never forwarded to the community broker.
+
+### Published path field
+
+When a direct packet includes routing path data, the published payload includes a `path` field containing comma-separated hop identifiers. Token width varies with the packet's `path_hash_mode` setting: 1, 2, or 3 bytes per hop. This is the packet's path as reported by the firmware — it is not a flat per-byte rendering.
+
+<Note>
+**Private vs. community MQTT**: Private MQTT can forward both decoded messages and raw RF packets and connects to a broker you control. Community MQTT forwards raw packets only and connects to the shared mesh monitoring network. If you want to forward decoded message content, use Private MQTT.
+</Note>
+
+<Warning>
+**Windows compatibility**: On Windows, MQTT connections may fail due to the default asyncio event loop. Add `--loop none` to your uvicorn startup command:
+
+```bash
+uvicorn app.main:app --loop none
+```
+</Warning>
+
+## Event payloads
+
+### Message payload (`on_message`)
+
+Published for each decoded message that matches your configured scope. The payload is the full `Message` model:
+
+```json
+{
+  "type": "PRIV",
+  "conversation_key": "aabbccdd...",
+  "text": "hello from the mesh",
+  "sender_name": "Alice",
+  "sender_key": "ae92577bae6c4f1d...",
+  "outgoing": false,
+  "acked": false,
+  "paths": [{"path": "aa bb", "path_len": 2}],
+  "sender_timestamp": 1700000000,
+  "received_at": 1700000001
+}
+```
+
+| Field | Description |
+|---|---|
+| `type` | `PRIV` for direct messages, `CHAN` for channel messages |
+| `conversation_key` | Contact public key (DM) or channel key (channel message) |
+| `text` | Message body |
+| `sender_name` | Display name of the sender |
+| `sender_key` | Sender's full public key |
+| `outgoing` | `true` if you sent this message |
+| `acked` | `true` if an ACK was received |
+| `paths` | Observed routing paths |
+| `sender_timestamp` | Unix timestamp from the sender's device (second resolution) |
+| `received_at` | Unix timestamp when RemoteTerm received the message |
+
+### Raw packet payload (`on_raw`)
+
+Published for each RF packet arrival that matches your configured scope:
+
+```json
+{
+  "id": 1234,
+  "observation_id": "a1b2c3d4-...",
+  "raw": "deadbeef01020304...",
+  "timestamp": 1700000001,
+  "decrypted_info": {
+    "channel_key": "aabbccdd...",
+    "contact_key": null,
+    "text": "hello"
+  }
+}
+```
+
+| Field | Description |
+|---|---|
+| `id` | Storage row ID (payload-hash-based, shared by repeated observations of the same packet) |
+| `observation_id` | Unique per RF arrival — use this as the deduplication key for live feeds |
+| `raw` | Full packet bytes as a hex string |
+| `timestamp` | Unix timestamp of arrival |
+| `decrypted_info` | Present when RemoteTerm successfully decrypted the packet; includes `channel_key` or `contact_key` and the decoded `text` |
+
+## Managing integrations
+
+All integrations, including MQTT, are stored as fanout configs. You can manage them in the UI at **Settings > Integrations** or via the REST API:
+
+```bash
+# List all fanout configs
+GET /api/fanout
+
+# Create a new integration
+POST /api/fanout
+
+# Update an existing integration (triggers module reload)
+PATCH /api/fanout/{id}
+
+# Delete an integration (stops the module)
+DELETE /api/fanout/{id}
+```
+
+Each integration has an enabled/disabled toggle. Disabling an integration stops the module without deleting its configuration.

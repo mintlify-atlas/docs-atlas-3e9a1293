@@ -1,0 +1,194 @@
+---
+title: "Webhooks, Apprise, and SQS notifications"
+description: "Forward mesh events via HTTP webhooks with HMAC signing, Apprise notifications to 80+ services, Amazon SQS queues, and community map upload."
+---
+
+RemoteTerm's fanout bus supports several outbound notification and delivery integrations beyond MQTT. Each integration is scope-gated — you control which messages trigger it — and can be enabled, disabled, or reconfigured at runtime without restarting the server. All integrations are managed via **Settings > Integrations** or the `/api/fanout` REST API.
+
+## HTTP webhooks
+
+Webhooks deliver message data to any HTTP endpoint. Go to **Settings > Integrations > Add > Webhook** to create an instance.
+
+### Configuration fields
+
+| Field | Type | Description |
+|---|---|---|
+| `url` | string | Target HTTP endpoint |
+| `method` | string | HTTP method: `POST`, `PUT`, or `PATCH` (default: `POST`) |
+| `hmac_secret` | string | Optional secret for HMAC-SHA256 request signing |
+| `hmac_header` | string | Header name for the signature (default: `X-Webhook-Signature`) |
+| `headers` | object | Arbitrary extra request headers as a JSON object |
+
+### HMAC signing
+
+When `hmac_secret` is set, RemoteTerm signs each request body with HMAC-SHA256 and includes the signature in a request header. The header value is formatted as `sha256=<hex_digest>`. Your endpoint can verify the signature to confirm the request came from RemoteTerm.
+
+```python
+import hashlib, hmac
+
+def verify(body: bytes, secret: str, signature_header: str) -> bool:
+    expected = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, signature_header)
+```
+
+### Scope
+
+Use the scope selector to control which messages trigger the webhook: all incoming messages, only messages from specific channels or contacts, or all except specific ones.
+
+### Payload
+
+The webhook body is `Message.model_dump()` serialized as JSON with sorted keys:
+
+```json
+{
+  "type": "CHAN",
+  "conversation_key": "aabbccdd...",
+  "text": "hello",
+  "sender_name": "Alice",
+  "sender_key": "ae92577bae6c...",
+  "outgoing": false,
+  "acked": false,
+  "paths": [{"path": "aabb", "path_len": 1}],
+  "sender_timestamp": 1700000000,
+  "received_at": 1700000001
+}
+```
+
+An `X-Webhook-Event` header is always included with the value `message`.
+
+## Apprise notifications
+
+Apprise supports 80+ notification services through a URL-based configuration format — Slack, Discord, Telegram, Pushover, ntfy, Gotify, and many more. Go to **Settings > Integrations > Add > Apprise** to create an instance.
+
+### Configuration fields
+
+| Field | Type | Description |
+|---|---|---|
+| `urls` | string | Newline-separated list of [Apprise service URLs](https://github.com/caronc/apprise/wiki) |
+| `preserve_identity` | boolean | When enabled, suppresses Discord webhook name and avatar overrides so notifications appear from the webhook's configured identity |
+| `include_path` | boolean | When enabled, appends routing hop information to the notification body |
+
+### Notification format
+
+Direct messages are formatted as:
+
+```
+DM: Alice: hello there
+```
+
+Channel messages are formatted as:
+
+```
+#general: Alice: hello there
+```
+
+<Note>
+Channel message text already includes the sender name prefix as stored. RemoteTerm strips the leading `"<sender_name>: "` prefix before formatting to avoid duplication in the notification body.
+</Note>
+
+When `include_path` is enabled, a routing path summary is appended:
+
+```
+DM: Alice: hello there **via:** [`aabb`, `ccdd`]
+```
+
+### Scope
+
+Use the scope selector to control which messages trigger Apprise notifications. Outgoing messages are never forwarded — Apprise notifications fire on incoming messages only.
+
+## Amazon SQS
+
+The SQS integration publishes message and raw packet events to an Amazon SQS queue. Go to **Settings > Integrations > Add > Amazon SQS** to create an instance.
+
+### Configuration fields
+
+| Field | Type | Description |
+|---|---|---|
+| `queue_url` | string | Target SQS queue URL |
+| `region_name` | string | Optional AWS region; inferred from the queue URL when omitted |
+| `endpoint_url` | string | Optional custom endpoint URL (for LocalStack or private AWS endpoints) |
+| `access_key_id` | string | Optional AWS access key ID |
+| `secret_access_key` | string | Optional AWS secret access key |
+| `session_token` | string | Optional AWS session token (for temporary credentials) |
+
+When `access_key_id` and `secret_access_key` are left blank, RemoteTerm falls back to the standard AWS credential chain — environment variables, instance profile, `~/.aws/credentials`, etc.
+
+### FIFO queue support
+
+When the `queue_url` ends in `.fifo`, RemoteTerm automatically adds `MessageGroupId` and `MessageDeduplicationId` attributes. Messages are grouped by conversation key and deduplicated by message ID or `observation_id`.
+
+### Payload envelope
+
+All events are wrapped in a JSON envelope:
+
+```json
+{
+  "event_type": "message",
+  "data": {
+    "type": "PRIV",
+    "conversation_key": "aabbccdd...",
+    "text": "hello",
+    ...
+  }
+}
+```
+
+The `event_type` field is either `"message"` or `"raw_packet"`. The `data` field contains the full message or raw packet payload. An `event_type` message attribute is also set on the SQS message for filtering.
+
+### Scope
+
+Use the scope selector to control whether messages, raw packets, or both are forwarded to SQS.
+
+## Map upload
+
+The map upload integration shares heard repeater and room-server advertisements with the community map at [map.meshcore.io](https://map.meshcore.io). Go to **Settings > Integrations > Add > Map Upload** to create an instance.
+
+### Configuration fields
+
+| Field | Type | Description |
+|---|---|---|
+| `api_url` | string | Optional upload endpoint; defaults to the public `map.meshcore.io` API when blank |
+| `dry_run` | boolean | When `true` (the default), logs upload payloads at INFO level without sending them |
+| `geofence_enabled` | boolean | When `true`, only uploads nodes within `geofence_radius_km` of your radio |
+| `geofence_radius_km` | float | Filter radius in kilometres |
+
+<Tip>
+Start with `dry_run: true` to verify what would be uploaded before enabling live sends.
+</Tip>
+
+### Geofencing
+
+When `geofence_enabled` is on, the geofence center is your radio's own latitude and longitude read live from `self_info` at upload time — it is not stored in the integration config. If your radio's coordinates are `(0, 0)` or the radio is not connected, the geofence check is skipped and uploads continue normally until coordinates are configured.
+
+<Note>
+Map upload requires firmware built with `ENABLE_PRIVATE_KEY_EXPORT=1` to sign upload payloads. This integration only processes raw RF packets — decoded message content is never uploaded.
+</Note>
+
+## Managing integrations
+
+<CardGroup cols={2}>
+  <Card title="UI management" icon="sliders">
+    All integrations are accessible at **Settings > Integrations**. Create, edit, enable, disable, or delete any integration from there.
+  </Card>
+  <Card title="REST API" icon="code">
+    Manage integrations programmatically via `GET`, `POST`, `PATCH`, and `DELETE` on `/api/fanout`.
+  </Card>
+</CardGroup>
+
+### Integration states
+
+Each integration has an **enabled** toggle. Disabling an integration stops the module and skips validation — the configuration is preserved as a draft. Re-enabling reloads and starts the module immediately.
+
+```bash
+# List all integrations
+GET /api/fanout
+
+# Create a new integration
+POST /api/fanout
+
+# Update an integration (triggers immediate module reload)
+PATCH /api/fanout/{id}
+
+# Delete an integration (stops the module)
+DELETE /api/fanout/{id}
+```

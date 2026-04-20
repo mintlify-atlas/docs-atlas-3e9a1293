@@ -1,0 +1,68 @@
+---
+title: "RemoteTerm for MeshCore: what it is and how it works"
+description: "RemoteTerm is a self-hosted FastAPI and React interface for MeshCore radios: messaging, packet capture, bots, MQTT, and network visualization."
+---
+
+RemoteTerm is a self-hosted FastAPI backend paired with a React browser interface for MeshCore mesh radio networks. You connect a MeshCore-compatible radio to the backend over Serial (USB), TCP, or Bluetooth (BLE), and then access a full-featured messaging and management interface from any browser on your network or VPN. All packet processing, decryption, and storage happens server-side, so you can monitor unlimited contacts and channels regardless of what the radio itself can hold.
+
+<Warning>
+  RemoteTerm is designed for trusted environments only. Do not expose it to an untrusted network or the public internet without enabling HTTP Basic Auth paired with HTTPS. The bot system executes arbitrary Python code, which means anyone with access to the UI can run code on your server. To completely disable the bot system, start the server with `MESHCORE_DISABLE_BOTS=true`.
+</Warning>
+
+## How it connects to your radio
+
+RemoteTerm supports three transport modes. Only one transport may be active at a time.
+
+- **Serial (USB)** — the most common and most reliable method. Plug your MeshCore radio in via USB and point RemoteTerm at the serial port.
+- **TCP** — connect over your local network to a radio running a TCP bridge, useful for remote or headless setups.
+- **Bluetooth (BLE)** — connect wirelessly to a nearby radio. BLE works best with the native install; Docker requires additional manual compose configuration.
+
+The transport is selected by setting an environment variable before starting the server. If none is set, RemoteTerm attempts serial auto-detection.
+
+## What you can do
+
+- Send and receive direct messages and channel messages from your browser
+- Cache all received packets and decrypt them retroactively as you gain channel keys
+- Run multiple Python bots that analyze messages and respond to DMs and channels
+- Monitor unlimited contacts and channels — radio storage limits do not apply because packets are decrypted and stored server-side
+- Access your radio remotely over your network or VPN
+- Search for hashtag channel names for channels you do not have keys for yet
+- Forward packets to MQTT brokers, LetsMesh, MeshRank, SQS, Apprise, and more
+- Use radios running MeshCore 1.14 firmware with multibyte pathing support
+- Visualize the mesh as a map or force-directed node graph, and view repeater stats
+
+## Architecture overview
+
+RemoteTerm follows a three-tier architecture: the radio communicates with the FastAPI backend over Serial, TCP, or BLE; the backend stores packets in a local SQLite database, decrypts messages server-side, and exposes a REST and WebSocket API; the React frontend connects to that API and displays real-time updates in your browser.
+
+```
+Radio (Serial / TCP / BLE)
+        ↓
+Backend (FastAPI + SQLite)
+  REST API + WebSocket (/api/*)
+        ↓
+Browser (React frontend)
+```
+
+The backend serves the compiled frontend as static files, so there is only one process and one port to manage. All API routes are prefixed with `/api`. A live API explorer is available at `http://localhost:8000/docs` once the server is running.
+
+<Note>
+  RemoteTerm does full management of the radio. Once connected, all contacts and channels are imported to RemoteTerm and the set of contacts synced to the device is governed by RemoteTerm. This makes it a poor fit for setups where radios are swapped in and out while preserving independent radio state.
+</Note>
+
+## Get started
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Install from source using uv and Node.js and connect your first radio.
+  </Card>
+  <Card title="Docker install" icon="docker" href="/installation/docker">
+    Run RemoteTerm via Docker Compose with serial device passthrough.
+  </Card>
+  <Card title="Arch Linux (AUR)" icon="linux" href="/installation/aur">
+    Install the remoteterm-meshcore AUR package on Arch Linux.
+  </Card>
+  <Card title="Configuration" icon="gear" href="/configuration/radio-connection">
+    Explore all environment variables and runtime settings.
+  </Card>
+</CardGroup>

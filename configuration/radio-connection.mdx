@@ -1,0 +1,199 @@
+---
+title: "Configure your MeshCore radio transport in RemoteTerm"
+description: "Configure Serial, TCP, or BLE radio transport for RemoteTerm, including port detection, auto-reconnect behavior, and platform-specific setup steps."
+---
+
+RemoteTerm connects to your MeshCore radio using one of three transport modes: Serial (USB), TCP (network), or BLE (Bluetooth Low Energy). Only one transport can be active at a time. The transport is selected by which environment variables you set at launch — if none are set, RemoteTerm falls back to serial auto-detection.
+
+<Warning>
+  RemoteTerm takes **full management** of the radio. On connect, all contacts and channels are imported from the radio and offloaded to RemoteTerm's database. The set of contacts actually stored on the radio is then governed by RemoteTerm. This makes RemoteTerm a poor fit for users who frequently swap radios and expect each radio to maintain its own independent state (favorites, channels, etc.).
+</Warning>
+
+## Choosing a transport
+
+<Tabs>
+  <Tab title="Serial (recommended)">
+    Serial is the most reliable transport and is recommended for all setups where the radio is physically connected to the machine running RemoteTerm. Serial connections give RemoteTerm exclusive access to the device, enabling efficient channel-slot caching and avoiding the per-send overhead required by TCP.
+
+    **Set the port explicitly:**
+
+    ```bash
+    MESHCORE_SERIAL_PORT=/dev/ttyUSB0 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+    ```
+
+    **Or rely on auto-detection** (omit `MESHCORE_SERIAL_PORT` entirely):
+
+    ```bash
+    uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+    ```
+
+    Auto-detection scans common serial port paths and connects to the first recognized device. It works well when only one radio is connected. If you have multiple serial devices, set the port explicitly to avoid connecting to the wrong device.
+
+    The default baud rate is `115200`. Override with `MESHCORE_SERIAL_BAUDRATE` only if your radio firmware requires a different rate.
+  </Tab>
+  <Tab title="TCP">
+    TCP transport connects to a radio accessible over a network, such as a radio attached to a different machine or exposed via a TCP bridge. Set `MESHCORE_TCP_HOST` to activate TCP:
+
+    ```bash
+    MESHCORE_TCP_HOST=192.168.1.100 MESHCORE_TCP_PORT=5000 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+    ```
+
+    `MESHCORE_TCP_PORT` defaults to `5000` if not set.
+
+    <Note>
+      TCP radios force `set_channel(...)` before every channel send. RemoteTerm cannot assume exclusive access to a network-connected radio, so it cannot safely cache channel slot assignments between sends. This adds a small per-send latency compared to serial. You can also force this behavior on serial/BLE connections with `MESHCORE_FORCE_CHANNEL_SLOT_RECONFIGURE=true` if another client is mutating channel slots underneath RemoteTerm.
+    </Note>
+  </Tab>
+  <Tab title="BLE">
+    BLE transport connects via Bluetooth Low Energy. Both `MESHCORE_BLE_ADDRESS` and `MESHCORE_BLE_PIN` are required:
+
+    ```bash
+    MESHCORE_BLE_ADDRESS=AA:BB:CC:DD:EE:FF MESHCORE_BLE_PIN=123456 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+    ```
+
+    BLE is slower than serial for contact table enumeration. On radios with many contacts, the initial enumeration during setup may time out. RemoteTerm continues on a best-effort basis in that case, but some contact adds may fail or be redundant.
+
+    If contact table enumeration timeouts are a recurring problem, enable autoevict mode:
+
+    ```bash
+    MESHCORE_BLE_ADDRESS=AA:BB:CC:DD:EE:FF MESHCORE_BLE_PIN=123456 MESHCORE_LOAD_WITH_AUTOEVICT=true uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+    ```
+
+    See [Contact loading issues](#contact-loading-issues) below for more detail.
+
+    <Note>
+      Docker BLE support requires manual Compose customization for Bluetooth passthrough and may need privileged mode or host networking. For BLE, the native Python launch is simpler.
+    </Note>
+  </Tab>
+</Tabs>
+
+## Finding your serial port
+
+If you are using serial transport and need to find the correct port path, use the commands below for your platform.
+
+<Tabs>
+  <Tab title="Linux">
+    ```bash
+    ls /dev/ttyUSB* /dev/ttyACM*
+    ```
+
+    Most USB-serial adapters appear as `/dev/ttyUSB0` or `/dev/ttyACM0`. If neither exists, check that the radio is plugged in and that your user is in the `dialout` group:
+
+    ```bash
+    sudo usermod -aG dialout $USER
+    ```
+
+    Log out and back in for the group change to take effect.
+  </Tab>
+  <Tab title="macOS">
+    ```bash
+    ls /dev/cu.usbserial-* /dev/cu.usbmodem*
+    ```
+
+    The port name typically includes the adapter's serial number (e.g. `/dev/cu.usbserial-0001`).
+  </Tab>
+  <Tab title="Windows (PowerShell)">
+    ```powershell
+    Get-CimInstance Win32_SerialPort | Select-Object DeviceID, Caption
+    ```
+
+    Look for a device with "USB Serial" or your radio's adapter name in the Caption column. The `DeviceID` value is the port name to use (e.g. `COM8`).
+
+    Set the port before launching:
+
+    ```powershell
+    $env:MESHCORE_SERIAL_PORT="COM8"
+    uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+    ```
+  </Tab>
+  <Tab title="WSL2">
+    WSL2 does not expose USB serial devices by default. Use `usbipd` to attach the device to the WSL environment. Run these commands in an **elevated PowerShell** (not in WSL):
+
+    <Steps>
+      <Step title="Install usbipd">
+        ```powershell
+        winget install usbipd
+        ```
+
+        Restart your console after installation.
+      </Step>
+      <Step title="Find the device bus ID">
+        ```powershell
+        usbipd list
+        ```
+
+        Locate your radio's USB device in the list and note its bus ID (e.g. `3-8`).
+      </Step>
+      <Step title="Make the device shareable">
+        ```powershell
+        usbipd bind --busid 3-8
+        ```
+
+        Replace `3-8` with your device's bus ID. This only needs to be done once per device.
+      </Step>
+      <Step title="Attach the device to WSL">
+        ```powershell
+        usbipd attach --wsl --busid 3-8
+        ```
+
+        Run this each time you plug in the device. Inside WSL, the radio will appear as `/dev/ttyUSB0` or `/dev/ttyACM0`.
+      </Step>
+    </Steps>
+  </Tab>
+</Tabs>
+
+## Auto-reconnect behavior
+
+RemoteTerm runs a background health monitor that checks the radio connection every 5 seconds. If the radio disconnects — due to a cable pull, radio reboot, or transient error — the monitor detects the loss and begins reconnecting automatically. No manual action is required for normal disconnects.
+
+Once reconnected, RemoteTerm re-runs the full post-connect setup: it re-exports the private key, re-syncs contacts and channels, and re-registers event subscriptions.
+
+<Note>
+  Post-connect setup is timeout-bounded. If initial radio setup hangs too long (for example, because the radio is still rebooting), the backend logs the failure and pushes a toast notification instructing you to reboot the radio and restart the server.
+</Note>
+
+**Manual reconnect** is available when you need it:
+
+- In the UI: click the **Reconnect** button in the status bar.
+- Via API: `POST /api/radio/reconnect`
+
+You can also fully disconnect and pause automatic reconnect attempts with `POST /api/radio/disconnect`, then manually reconnect with `POST /api/radio/reconnect` when ready.
+
+## Radio management model
+
+RemoteTerm is designed to be the single authority over the connected radio. When it starts, it:
+
+1. Imports all existing contacts and channels from the radio into its database.
+2. Offloads contact and channel storage from the radio to the server (the radio holds only a working subset).
+3. Takes over contact slot management — determining which contacts are loaded on the radio at any given time based on favorites and recent activity.
+
+This model allows RemoteTerm to track far more contacts and channels than the radio's built-in limits (the radio supports roughly 350 contacts and 40 channels; RemoteTerm has no effective limit). Packets are decrypted server-side using the exported private key, so incoming messages are decrypted even for contacts not currently loaded on the radio.
+
+<Warning>
+  Because RemoteTerm actively manages which contacts are loaded on the radio, swapping radios while keeping the same RemoteTerm instance running is not well-supported. Each radio should have its own RemoteTerm instance, or you should restart RemoteTerm when switching radios.
+</Warning>
+
+## Contact loading issues
+
+RemoteTerm loads favorite and recently active contacts onto the radio so the radio can automatically acknowledge incoming direct messages on your behalf. To do this, it enumerates the radio's existing contact table, reconciles it with the desired working set, and loads the difference.
+
+If the radio's contact table is already full, some adds will fail and you'll see a warning that auto-DM acking may not work for all contacts.
+
+<AccordionGroup>
+  <Accordion title="Resolving a full contact table">
+    You have several options when the radio contact table is full:
+
+    - **Clear the radio's contact table** using another MeshCore client (e.g. the official companion app), then restart RemoteTerm.
+    - **Lower the contact fill target** in Radio Settings to reduce how many contacts RemoteTerm tries to maintain on the radio.
+    - **Enable autoevict mode** with `MESHCORE_LOAD_WITH_AUTOEVICT=true` to let the radio automatically make room for new contacts.
+
+    Note: sending and receiving messages is never blocked by contact table issues — only auto-DM acking is affected.
+  </Accordion>
+  <Accordion title="Autoevict mode details">
+    Setting `MESHCORE_LOAD_WITH_AUTOEVICT=true` enables an alternative loading strategy. On connect, RemoteTerm enables the radio's `AUTO_ADD_OVERWRITE_OLDEST` preference, which causes the radio to evict its oldest non-favorite contact when the table is full rather than rejecting the add.
+
+    **Trade-off:** Contacts loaded by RemoteTerm are not marked as radio-side favorites, so they are eviction candidates when the radio receives new advertisements while full. Freshly loaded contacts have a recent `lastmod` timestamp and are among the last evicted in practice, but this is not guaranteed.
+
+    If you disconnect the radio from RemoteTerm and use it standalone, the contacts RemoteTerm loaded will not be protected from eviction by newer advertisements.
+  </Accordion>
+</AccordionGroup>

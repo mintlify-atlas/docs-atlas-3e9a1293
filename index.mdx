@@ -1,97 +1,65 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
+title: "RemoteTerm for MeshCore: browser interface for mesh radio"
+description: "RemoteTerm connects your MeshCore radio to a browser-based interface for messaging, packet capture, bots, and MQTT — accessible over your network or VPN."
 ---
 
-## Setting up
+RemoteTerm is a self-hosted backend server and browser interface for MeshCore mesh radio networks. Connect your radio via USB serial, TCP, or Bluetooth, then access messaging, packet analysis, automation bots, and network visualization from any browser on your network.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Get RemoteTerm installed and connected to your radio in minutes.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Docker Install" icon="docker" href="/installation/docker">
+    Run RemoteTerm in a container with Docker Compose.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Radio Connection" icon="radio" href="/configuration/radio-connection">
+    Configure Serial, TCP, or BLE radio connections.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="API Reference" icon="code" href="/api-reference/overview">
+    Explore the full REST and WebSocket API.
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## What you can do with RemoteTerm
 
-Everything you need to create world-class documentation.
+<CardGroup cols={2}>
+  <Card title="Messaging" icon="message" href="/features/messaging">
+    Send and receive direct messages and channel messages from your browser.
+  </Card>
+  <Card title="Packet Capture" icon="database" href="/features/packet-capture">
+    Cache all received packets and decrypt retroactively as you gain channel keys.
+  </Card>
+  <Card title="Python Bots" icon="robot" href="/features/bots">
+    Run automated bots that analyze messages and respond to DMs and channels.
+  </Card>
+  <Card title="Network Visualization" icon="diagram-project" href="/features/network-visualization">
+    View your mesh as a map or force-directed node graph with repeater stats.
+  </Card>
+  <Card title="MQTT & Integrations" icon="plug" href="/integrations/mqtt">
+    Forward packets to MQTT brokers, Home Assistant, webhooks, Apprise, and SQS.
+  </Card>
+  <Card title="Web Push Notifications" icon="bell" href="/operations/web-push">
+    Receive browser push notifications for new messages, even when the tab is closed.
+  </Card>
+</CardGroup>
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+## Get started
 
-## Need inspiration?
+<Steps>
+  <Step title="Install RemoteTerm">
+    Clone the repository and install dependencies using `uv` and Node.js, or pull the Docker image.
+  </Step>
+  <Step title="Connect your radio">
+    Set your transport environment variable — `MESHCORE_SERIAL_PORT`, `MESHCORE_TCP_HOST`, or `MESHCORE_BLE_ADDRESS` — and launch the server.
+  </Step>
+  <Step title="Open the browser interface">
+    Navigate to `http://localhost:8000` to access the full messaging and management UI.
+  </Step>
+  <Step title="Configure integrations">
+    Add MQTT forwarding, Python bots, webhooks, or Home Assistant discovery from the Settings panel.
+  </Step>
+</Steps>
 
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+<Warning>
+  RemoteTerm is designed for trusted environments only. Do not expose it to an untrusted network without enabling HTTP Basic Auth and HTTPS. The bot system executes arbitrary Python code — anyone with access to the UI can run code on your server.
+</Warning>

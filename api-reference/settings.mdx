@@ -1,0 +1,206 @@
+---
+title: "Settings, Push, and Statistics API endpoints"
+description: "Manage RemoteTerm app settings, favorites, blocked lists, telemetry scheduling, Web Push subscriptions, and mesh statistics via the REST API."
+---
+
+RemoteTerm stores runtime configuration in a SQLite `app_settings` table — separate from environment variables. These settings control radio capacity, advertisement intervals, flood scope, and more. Changes take effect immediately without restarting the server. Web Push subscriptions and mesh statistics are also managed through this group of endpoints.
+
+## App settings
+
+### Get settings
+
+`GET /api/settings`
+
+Returns all current app settings.
+
+```bash
+curl http://localhost:8000/api/settings
+```
+
+### Update settings
+
+`PATCH /api/settings`
+
+Updates one or more app settings. All fields are optional — only provided fields are changed.
+
+<ParamField body="max_radio_contacts" type="integer">
+  Radio contact capacity baseline. Favorites load first; non-favorites fill to ~80% of this value. Offload triggers at ~95% occupancy.
+</ParamField>
+
+<ParamField body="auto_decrypt_dm_on_advert" type="boolean">
+  Automatically attempt historical DM decryption when a new contact advertisement is heard.
+</ParamField>
+
+<ParamField body="advert_interval" type="integer">
+  Seconds between automatic advertisements. Set to `0` to disable periodic advertising.
+</ParamField>
+
+<ParamField body="flood_scope" type="integer">
+  Default regional flood scope for channel message sends.
+</ParamField>
+
+<ParamField body="auto_resend_channel" type="boolean">
+  Automatically resend channel messages that did not receive an echo within the timeout window.
+</ParamField>
+
+<ParamField body="telemetry_interval_hours" type="number">
+  Hours between automatic repeater telemetry collection cycles.
+</ParamField>
+
+### Toggle a favorite
+
+`POST /api/settings/favorites/toggle`
+
+Adds or removes a contact from the favorites list. Favorited contacts are loaded onto the radio first and protected from eviction.
+
+<ParamField body="public_key" type="string" required>
+  Contact's public key (64-char hex).
+</ParamField>
+
+### Toggle a blocked key
+
+`POST /api/settings/blocked-keys/toggle`
+
+Adds or removes a public key from the blocked list. Messages from blocked keys are silently ignored.
+
+<ParamField body="key" type="string" required>
+  Public key to block or unblock.
+</ParamField>
+
+### Toggle a blocked name
+
+`POST /api/settings/blocked-names/toggle`
+
+Adds or removes a display name from the blocked list.
+
+<ParamField body="name" type="string" required>
+  Display name to block or unblock.
+</ParamField>
+
+### Toggle telemetry tracking for a repeater
+
+`POST /api/settings/tracked-telemetry/toggle`
+
+Adds or removes a repeater from the auto-telemetry collection list. Tracked repeaters are polled on the configured `telemetry_interval_hours` schedule.
+
+<ParamField body="public_key" type="string" required>
+  Repeater's public key.
+</ParamField>
+
+### Get telemetry schedule
+
+`GET /api/settings/tracked-telemetry/schedule`
+
+Returns the current telemetry scheduling state: interval options, the derived next-run-at timestamp, and which repeaters are tracked.
+
+---
+
+## Web Push notifications
+
+Web Push requires HTTPS and outbound internet access from the server to browser push services. See the [Web Push guide](/operations/web-push) for setup instructions.
+
+### Get VAPID public key
+
+`GET /api/push/vapid-public-key`
+
+Returns the server's VAPID public key. Pass this to `PushManager.subscribe()` in the browser when registering a push subscription.
+
+### Register a push subscription
+
+`POST /api/push/subscribe`
+
+Registers or updates a browser push subscription. Keyed by endpoint URL — re-registering the same endpoint upserts the record.
+
+<ParamField body="endpoint" type="string" required>
+  Browser push subscription endpoint URL.
+</ParamField>
+
+<ParamField body="keys" type="object" required>
+  Subscription keys from `PushManager.subscribe()`: `p256dh` and `auth`.
+</ParamField>
+
+### List push subscriptions
+
+`GET /api/push/subscriptions`
+
+Returns all registered browser push subscriptions with their labels and filter preferences.
+
+### Update a subscription
+
+`PATCH /api/push/subscriptions/{id}`
+
+Updates the label or filter preferences for a specific subscription.
+
+<ParamField path="id" type="string" required>
+  Subscription ID.
+</ParamField>
+
+<ParamField body="label" type="string">
+  Human-readable device label (e.g., "Work laptop").
+</ParamField>
+
+### Delete a subscription
+
+`DELETE /api/push/subscriptions/{id}`
+
+Removes a push subscription. The browser will no longer receive notifications from this server.
+
+### Send a test notification
+
+`POST /api/push/subscriptions/{id}/test`
+
+Sends a test push notification to verify the subscription is working.
+
+### Get push-enabled conversations
+
+`GET /api/push/conversations`
+
+Returns the global list of conversation state keys that have push notifications enabled. All subscribed browsers receive notifications for the same set of conversations.
+
+### Toggle a conversation's push state
+
+`POST /api/push/conversations/toggle`
+
+Adds or removes a conversation from the push-enabled list.
+
+<ParamField body="state_key" type="string" required>
+  Conversation state key. Format: `channel-{channel_key}` for channels, `contact-{public_key}` for contacts.
+</ParamField>
+
+<Note>
+  Push-enabled conversations are stored globally on the server — all subscribed browsers receive notifications for the same configured rooms and DMs. Per-device filtering is not currently supported.
+</Note>
+
+---
+
+## Mesh statistics
+
+### Get aggregated statistics
+
+`GET /api/statistics`
+
+Returns a snapshot of aggregated mesh network statistics from the database.
+
+```bash
+curl http://localhost:8000/api/statistics
+```
+
+<ResponseField name="entity_counts" type="object">
+  Counts of contacts, channels, messages, and raw packets stored in the database.
+</ResponseField>
+
+<ResponseField name="message_splits" type="object">
+  Message counts by type (`PRIV`/`CHAN`) and direction (incoming/outgoing).
+</ResponseField>
+
+<ResponseField name="activity_windows" type="object">
+  Message counts over the last hour, 24 hours, and 7 days.
+</ResponseField>
+
+<ResponseField name="busiest_channels" type="array">
+  Top channels ranked by total message volume, with message count per channel.
+</ResponseField>
+
+<ResponseField name="noise_floor_history" type="array">
+  Recent noise floor snapshots sampled from the radio every 60 seconds.
+</ResponseField>

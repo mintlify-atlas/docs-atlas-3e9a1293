@@ -1,0 +1,118 @@
+---
+title: "Mesh network visualization: map and node graph"
+description: "View your mesh as a Leaflet map or force-directed graph, with node GPS from passive advertisements, repeater telemetry history, and topology at a glance."
+---
+
+RemoteTerm provides two visual tools for understanding your mesh network: a geographic map showing node locations from advertisement data, and a force-directed graph showing how nodes and repeaters are connected. Both views are passive — they are built from advertisement packets the radio has already heard, so RemoteTerm does not need to send any radio commands to populate them.
+
+## Map view
+
+The map is built on Leaflet and shows contacts as markers positioned by their GPS coordinates. Coordinates come exclusively from mesh advertisement packets that the radio has passively received — RemoteTerm does not query nodes for their location.
+
+**How it works:**
+- Contacts with non-zero GPS coordinates in their advertisement data appear as map markers
+- MeshCore uses `0.0` as the sentinel for "no GPS data"; contacts reporting `(0.0, 0.0)` do not appear as positioned nodes
+- Click any marker to open the contact detail pane
+- Coordinates update automatically as new advertisements arrive over the WebSocket
+
+Because locations are derived from advertisements, accuracy depends on the reporting node's GPS fix and advert interval. Nodes that do not broadcast GPS will not appear on the map regardless of whether RemoteTerm knows about them.
+
+## Network visualizer
+
+The network visualizer renders mesh topology as a force-directed graph. Nodes represent contacts and repeaters; edges represent advertisement paths between them.
+
+### Advert-path identity
+
+RemoteTerm stores recent unique advertisement paths per contact in the `contact_advert_paths` table. Path identity is `(contact_public_key, path_hex, hop_count)` — the same hex bytes at different hop widths are treated as distinct paths. Up to 10 unique advertisement paths are retained per contact; older paths beyond that limit are evicted.
+
+This path memory is separate from raw-packet deduplication and from the direct route used for DM sends. Advertisement paths are informational only and do not influence how RemoteTerm routes outgoing messages.
+
+### Using the visualizer
+
+<AccordionGroup>
+  <Accordion title="Repeater disambiguation">
+    Multiple paths to the same repeater can appear as distinct edges. This helps identify when a repeater is reachable via different intermediate hops and reveals mesh structure that a simple node list cannot show.
+  </Accordion>
+  <Accordion title="Reading the graph">
+    Nodes are labeled with contact names. Edge thickness or count reflects the number of unique advertisement paths observed between two nodes. The layout is force-directed, so heavily connected nodes tend to cluster toward the center.
+  </Accordion>
+  <Accordion title="Fetching all advert paths">
+    Retrieve the full set of recent advert paths for all contacts via `GET /api/contacts/repeaters/advert-paths`. The visualizer uses this endpoint to build the graph on load.
+  </Accordion>
+</AccordionGroup>
+
+## Repeater dashboard
+
+The repeater dashboard provides operational visibility into your repeaters' health and performance. Telemetry can be fetched on demand or collected automatically on a configurable cycle.
+
+### Telemetry collection
+
+<CardGroup cols={2}>
+  <Card title="Manual fetch" icon="hand-pointer">
+    Open any repeater's detail pane and trigger a status fetch. The radio sends a telemetry request to the repeater and displays the result.
+  </Card>
+  <Card title="Auto-collect" icon="clock">
+    Configure tracked repeaters in **Settings > Tracked Telemetry**. The server fetches telemetry on a schedule (default ~8 hours, configurable via `telemetry_interval_hours`). View the next run time at `GET /api/settings/tracked-telemetry/schedule`.
+  </Card>
+</CardGroup>
+
+**Telemetry fields collected:**
+
+| Field | Description |
+|-------|-------------|
+| `battery_volts` | Battery voltage |
+| `noise_floor_dbm` | Ambient RF noise floor |
+| `last_rssi_dbm` | Last received signal strength |
+| `last_snr_db` | Last signal-to-noise ratio |
+| `packets_received` / `packets_sent` | Total packet counts |
+| `uptime_seconds` | Time since last reboot |
+| `airtime_seconds` | Cumulative TX airtime |
+| `flood_dups` / `direct_dups` | Duplicate packet counts |
+
+Telemetry history is stored in the `repeater_telemetry_history` table. Retrieve it for graphing via `GET /api/contacts/{key}/repeater/telemetry-history` — this endpoint reads only from the database and does not contact the radio.
+
+### Remote CLI commands
+
+From the repeater dashboard, you can send commands directly to a repeater over the mesh:
+
+```bash
+POST /api/contacts/{key}/command          # Send a CLI command
+POST /api/contacts/{key}/repeater/status  # Fetch status telemetry
+POST /api/contacts/{key}/repeater/neighbors  # Fetch neighbor list
+POST /api/contacts/{key}/repeater/acl     # Fetch access control list
+POST /api/contacts/{key}/repeater/node-info  # Fetch name, location, clock
+POST /api/contacts/{key}/repeater/radio-settings  # Fetch radio config
+```
+
+### Trace routes and path discovery
+
+<Steps>
+  <Step title="Trace route (global)">
+    `POST /api/radio/trace` sends a multi-hop trace loop through all known repeaters and back to the local radio, measuring round-trip paths across the mesh.
+  </Step>
+  <Step title="Trace to specific contact">
+    `POST /api/contacts/{key}/trace` traces the route to a specific contact only.
+  </Step>
+  <Step title="Path discovery">
+    `POST /api/contacts/{key}/path-discovery` discovers the forward and return paths to a contact and persists the result as the contact's learned direct route. This updates the route used for future DM sends to that contact.
+  </Step>
+</Steps>
+
+## Statistics overview
+
+`GET /api/statistics` returns aggregated mesh statistics across the full stored history:
+
+- Entity counts: total contacts, channels, messages, raw packets
+- Message and packet splits by type (PRIV vs CHAN, inbound vs outbound)
+- Activity windows: busiest hours, most active channels
+- Noise floor history snapshots
+
+The 60-second radio stats sampling loop in `radio_stats.py` also dispatches enriched health snapshots to all fanout modules, so external integrations (MQTT, webhooks, etc.) receive periodic radio health data.
+
+## Mesh discovery
+
+`POST /api/radio/discover` runs a short sweep to discover nearby repeaters and sensors. This actively transmits a discovery packet; use it when you want to populate the repeater list quickly rather than waiting for passive advertisement traffic.
+
+<Note>
+  Discovery is one of the few features that actively transmits. All other visualization data — map positions, network graph edges, repeater statistics retrieved from the history table — is derived from traffic the radio has already heard. If your mesh is quiet, passive views may be sparse until more advertisements arrive.
+</Note>

@@ -1,0 +1,182 @@
+---
+title: "Fanout API: configure MQTT, bots, and webhooks"
+description: "Manage RemoteTerm's fanout integrations — MQTT, bots, webhooks, Apprise, and SQS — via the /api/fanout REST endpoints with scope-based event routing."
+---
+
+The fanout API manages all external integrations in RemoteTerm. Each integration is a fanout module that receives mesh events (decoded messages, raw packets, contact updates, or telemetry) based on a configurable scope. Modules are created, updated, and deleted via these endpoints; changes take effect immediately without restarting the server.
+
+All fanout endpoints are at `/api/fanout`.
+
+## List all integrations
+
+`GET /api/fanout`
+
+Returns all fanout configurations including their type, name, enabled state, config blob, scope, and sort order.
+
+```bash
+curl http://localhost:8000/api/fanout
+```
+
+## Create an integration
+
+`POST /api/fanout`
+
+Creates a new fanout module. If `enabled` is `true`, the module starts immediately.
+
+<ParamField body="type" type="string" required>
+  Integration type. One of: `mqtt_private`, `mqtt_community`, `bot`, `webhook`, `apprise`, `sqs`, `map_upload`.
+</ParamField>
+
+<ParamField body="name" type="string" required>
+  Human-readable label for this integration.
+</ParamField>
+
+<ParamField body="enabled" type="boolean">
+  Whether to start the module immediately. Disabled configs are treated as drafts — validation is skipped.
+</ParamField>
+
+<ParamField body="config" type="object" required>
+  Type-specific configuration. See schemas below.
+</ParamField>
+
+<ParamField body="scope" type="object">
+  Controls which events reach this module. See scope format below.
+</ParamField>
+
+## Update an integration
+
+`PATCH /api/fanout/{id}`
+
+Updates an existing fanout config. Triggers a module reload — the old module is stopped and a new one started with the updated config.
+
+<ParamField path="id" type="string" required>
+  UUID of the fanout config to update.
+</ParamField>
+
+## Delete an integration
+
+`DELETE /api/fanout/{id}`
+
+Stops and removes the fanout module permanently.
+
+## Disable all bots until restart
+
+`POST /api/fanout/bots/disable-until-restart`
+
+Stops all bot fanout modules and keeps bots disabled until the server process restarts. Equivalent to setting `MESHCORE_DISABLE_BOTS=true` at runtime.
+
+---
+
+## Scope format
+
+The `scope` field controls which events reach a module. Only `on_message` and `on_raw` are scope-gated; contact, telemetry, and health events are dispatched to all modules unconditionally.
+
+```json
+// All messages and all raw packets
+{"messages": "all", "raw_packets": "all"}
+
+// No messages, only raw packets
+{"messages": "none", "raw_packets": "all"}
+
+// Specific channels and all contacts; no raw packets
+{"messages": {"channels": ["<channel_key>"], "contacts": "all"}, "raw_packets": "none"}
+```
+
+<Note>
+  Community MQTT always enforces `{"messages": "none", "raw_packets": "all"}` regardless of the scope you configure.
+</Note>
+
+---
+
+## Config schemas by type
+
+<AccordionGroup>
+  <Accordion title="mqtt_private — Private MQTT broker">
+    Publishes decoded messages and/or raw packets to your own MQTT broker.
+
+    | Field | Type | Description |
+    |-------|------|-------------|
+    | `broker_host` | string | MQTT broker hostname or IP |
+    | `broker_port` | integer | Broker port (default 1883) |
+    | `username` | string | Optional broker username |
+    | `password` | string | Optional broker password |
+    | `use_tls` | boolean | Enable TLS connection |
+    | `tls_insecure` | boolean | Skip TLS certificate verification |
+    | `topic_prefix` | string | Prefix for all published topics |
+  </Accordion>
+
+  <Accordion title="mqtt_community — Community mesh MQTT">
+    Publishes raw packets to community mesh monitoring infrastructure. Messages are never forwarded.
+
+    | Field | Type | Description |
+    |-------|------|-------------|
+    | `broker_host` | string | Community broker hostname |
+    | `broker_port` | integer | Broker port |
+    | `iata` | string | Your IATA airport code (location identifier) |
+    | `email` | string | Contact email for the community network |
+  </Accordion>
+
+  <Accordion title="bot — Python automation bot">
+    Executes Python code in response to incoming messages.
+
+    | Field | Type | Description |
+    |-------|------|-------------|
+    | `code` | string | Python function source code to execute |
+
+    <Warning>
+      Bot code runs via `exec()` with full `__builtins__`. Anyone with UI access can execute arbitrary Python on your server. Use `MESHCORE_DISABLE_BOTS=true` or `POST /api/fanout/bots/disable-until-restart` to turn off the bot system entirely.
+    </Warning>
+  </Accordion>
+
+  <Accordion title="webhook — HTTP webhook delivery">
+    POSTs message payloads to an HTTP endpoint with optional HMAC signing.
+
+    | Field | Type | Description |
+    |-------|------|-------------|
+    | `url` | string | Target webhook URL |
+    | `method` | string | HTTP method: `POST`, `PUT`, or `PATCH` |
+    | `hmac_secret` | string | Optional HMAC-SHA256 signing secret |
+    | `hmac_header` | string | Header name for signature (default: `X-Webhook-Signature`) |
+    | `headers` | object | Arbitrary extra headers as a JSON object |
+
+    When `hmac_secret` is set, each request includes a signature header in the format `sha256=<hex>`.
+  </Accordion>
+
+  <Accordion title="apprise — Push notification services">
+    Sends notifications via the Apprise library, which supports 80+ services.
+
+    | Field | Type | Description |
+    |-------|------|-------------|
+    | `urls` | string | Newline-separated Apprise service URLs |
+    | `preserve_identity` | boolean | Suppress Discord webhook name/avatar override |
+    | `include_path` | boolean | Include routing path in notification body |
+  </Accordion>
+
+  <Accordion title="sqs — Amazon SQS queue">
+    Publishes message or raw packet events to an SQS queue as JSON.
+
+    | Field | Type | Description |
+    |-------|------|-------------|
+    | `queue_url` | string | Target SQS queue URL |
+    | `region_name` | string | AWS region (inferred from queue URL if omitted) |
+    | `endpoint_url` | string | Optional custom endpoint (e.g., LocalStack) |
+    | `access_key_id` | string | Optional AWS access key (falls back to credential chain) |
+    | `secret_access_key` | string | Optional AWS secret key |
+    | `session_token` | string | Optional AWS session token |
+
+    Published payload format: `{"event_type": "message" | "raw_packet", "data": {...}}`
+  </Accordion>
+
+  <Accordion title="map_upload — Upload node locations to map.meshcore.io">
+    Uploads heard repeater and room-server advertisements to the community map.
+
+    | Field | Type | Default | Description |
+    |-------|------|---------|-------------|
+    | `api_url` | string | `""` | Upload endpoint; empty uses map.meshcore.io |
+    | `dry_run` | boolean | `true` | Log payload without sending |
+    | `geofence_enabled` | boolean | `false` | Only upload nodes within radius |
+    | `geofence_radius_km` | float | `0` | Filter radius in kilometres |
+
+    The geofence center is your radio's own `adv_lat`/`adv_lon`, read live at upload time. Requires firmware with `ENABLE_PRIVATE_KEY_EXPORT=1`.
+  </Accordion>
+</AccordionGroup>

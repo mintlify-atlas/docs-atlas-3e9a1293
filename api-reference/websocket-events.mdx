@@ -1,0 +1,362 @@
+---
+title: 'WebSocket events: connect to /api/ws for real-time updates'
+description: 'All WebSocket event types emitted by RemoteTerm: health, contact, message, raw_packet, channel, error, and more — with full payload field reference.'
+---
+
+RemoteTerm pushes all real-time state changes — incoming messages, contact advertisements, channel updates, raw RF packets, and health changes — over a single WebSocket endpoint. Clients connect once and receive a continuous stream of typed JSON events. The REST API handles reads and mutations; the WebSocket is the delivery mechanism for changes that originate from the radio.
+
+## Connecting
+
+```
+ws://your-host:8000/api/ws
+```
+
+Use `wss://` when TLS is configured. If HTTP Basic Auth is enabled on the server, include credentials in the URL or `Authorization` header (browser WebSocket APIs pass cookies and headers automatically when the origin matches).
+
+### Keepalive
+
+Send the literal text string `"ping"` to keep the connection alive. The server responds with `{"type":"pong"}`.
+
+### Initial state
+
+On connect, the server immediately sends one `health` event with the current radio connection status. Contacts and channels are **not** sent over the WebSocket on connect — load them via `GET /api/contacts` and `GET /api/channels` after the initial connection.
+
+## Event envelope
+
+Every event is a JSON object with a `type` field and a `data` payload:
+
+```json
+{
+  "type": "message",
+  "data": { ... }
+}
+```
+
+## Event types
+
+### `health`
+
+Sent personally to each client on connect. Also broadcast to all clients whenever the radio connection state changes (connect, disconnect, reconnect failure).
+
+<ResponseField name="connected" type="boolean" required>
+  Whether the radio is currently connected.
+</ResponseField>
+
+<ResponseField name="connection_info" type="string | null">
+  Human-readable description of the connection (e.g. `"Serial /dev/ttyUSB0"`), or `null` when disconnected.
+</ResponseField>
+
+```json
+{
+  "type": "health",
+  "data": {
+    "connected": true,
+    "connection_info": "Serial /dev/ttyUSB0"
+  }
+}
+```
+
+---
+
+### `contact`
+
+Broadcast whenever a contact is created or updated — from incoming advertisements, radio sync, or API mutations.
+
+<ResponseField name="public_key" type="string" required>
+  64-character hex public key.
+</ResponseField>
+
+<ResponseField name="name" type="string | null">
+  Display name, or `null` if not yet known.
+</ResponseField>
+
+<ResponseField name="type" type="number" required>
+  Contact type: `0`=unknown, `1`=client, `2`=repeater, `3`=room, `4`=sensor.
+</ResponseField>
+
+<ResponseField name="lat" type="number | null">
+  Latitude from the most recent advertisement (`0.0` is the MeshCore sentinel for "no GPS").
+</ResponseField>
+
+<ResponseField name="lon" type="number | null">
+  Longitude from the most recent advertisement.
+</ResponseField>
+
+<ResponseField name="last_seen" type="number | null">
+  Unix timestamp of the most recent observation.
+</ResponseField>
+
+<ResponseField name="first_seen" type="number | null">
+  Unix timestamp of the first observation.
+</ResponseField>
+
+<ResponseField name="on_radio" type="boolean" required>
+  Whether this contact is currently loaded in the radio's contact table.
+</ResponseField>
+
+<ResponseField name="effective_route" type="object">
+  Backend-computed effective routing decision for outgoing DMs. Consume this field; do not reconstruct route precedence.
+  <Expandable title="properties">
+    <ResponseField name="path" type="string">Hex-encoded path bytes (empty for direct/flood).</ResponseField>
+    <ResponseField name="path_len" type="number">Hop count (-1=flood, 0=direct, >0=explicit).</ResponseField>
+    <ResponseField name="path_hash_mode" type="number">Hop identifier width (0=1-byte, 1=2-byte, 2=3-byte).</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="effective_route_source" type="string" required>
+  Which routing input is active: `"override"`, `"direct"`, or `"flood"`.
+</ResponseField>
+
+---
+
+### `contact_resolved`
+
+Sent when a prefix-only contact placeholder is reconciled to a full contact. The UI should replace any reference to `previous_public_key` with the full contact.
+
+<ResponseField name="previous_public_key" type="string" required>
+  The short prefix key that was previously stored.
+</ResponseField>
+
+<ResponseField name="contact" type="object" required>
+  The full resolved Contact object (same shape as the `contact` event payload).
+</ResponseField>
+
+---
+
+### `contact_deleted`
+
+Sent when a contact is removed from the database.
+
+<ResponseField name="public_key" type="string" required>
+  The 64-character hex key of the deleted contact.
+</ResponseField>
+
+---
+
+### `message`
+
+Sent whenever a new message is stored — incoming channel and DM messages from the packet processor, and outgoing messages from the send endpoints.
+
+<ResponseField name="id" type="number" required>
+  Database row ID for the message.
+</ResponseField>
+
+<ResponseField name="type" type="string" required>
+  `"PRIV"` for direct messages or `"CHAN"` for channel messages.
+</ResponseField>
+
+<ResponseField name="conversation_key" type="string" required>
+  Contact public key for `PRIV` messages; channel key for `CHAN` messages.
+</ResponseField>
+
+<ResponseField name="text" type="string" required>
+  Plaintext message body.
+</ResponseField>
+
+<ResponseField name="sender_name" type="string | null">
+  Display name of the sender, or `null` for outgoing messages.
+</ResponseField>
+
+<ResponseField name="sender_key" type="string | null">
+  Public key of the sender (present when known; used for per-contact channel attribution).
+</ResponseField>
+
+<ResponseField name="outgoing" type="boolean" required>
+  `true` for messages sent by the local radio.
+</ResponseField>
+
+<ResponseField name="acked" type="number" required>
+  ACK/echo count. For outgoing DMs: `1` once delivery is confirmed. For outgoing channel messages: number of echoes received.
+</ResponseField>
+
+<ResponseField name="paths" type="array | null">
+  Routing paths this message arrived via. Each element has `path` (hex), `received_at` (timestamp), `path_len`, `rssi`, and `snr`.
+</ResponseField>
+
+<ResponseField name="sender_timestamp" type="number | null">
+  Sender-side Unix timestamp at 1-second resolution (firmware wire format).
+</ResponseField>
+
+<ResponseField name="received_at" type="number" required>
+  Server-side Unix timestamp when the message was stored.
+</ResponseField>
+
+---
+
+### `message_acked`
+
+Sent when an existing message's ACK state is updated — delivery confirmation for DMs, or a repeat/echo for channel messages.
+
+<ResponseField name="id" type="number" required>
+  Database row ID of the updated message.
+</ResponseField>
+
+<ResponseField name="acked" type="number" required>
+  Updated ACK/echo count.
+</ResponseField>
+
+<ResponseField name="paths" type="array | null">
+  Updated paths list with the newly observed routing path appended.
+</ResponseField>
+
+---
+
+### `raw_packet`
+
+Sent for every incoming RF packet, regardless of whether it was successfully decrypted. Suitable for building a live packet feed ("radio aquarium").
+
+<ResponseField name="id" type="number" required>
+  Storage row ID. This is a **payload-identity** — duplicate payloads share one row due to storage deduplication (path bytes are excluded from the hash).
+</ResponseField>
+
+<ResponseField name="observation_id" type="number" required>
+  Monotonic per-process ID unique to this RF arrival. Use this as the deduplication and render key for a real-time feed.
+</ResponseField>
+
+<ResponseField name="timestamp" type="number" required>
+  Unix timestamp when the packet was received.
+</ResponseField>
+
+<ResponseField name="data" type="string" required>
+  Hex-encoded raw packet bytes.
+</ResponseField>
+
+<ResponseField name="payload_type" type="string" required>
+  Packet type name (e.g., `"GROUP_TEXT"`, `"ADVERT"`, `"ACK"`).
+</ResponseField>
+
+<ResponseField name="snr" type="number | null">
+  Signal-to-noise ratio in dB, if reported by the radio.
+</ResponseField>
+
+<ResponseField name="rssi" type="number | null">
+  Received signal strength in dBm, if reported by the radio.
+</ResponseField>
+
+<ResponseField name="decrypted" type="boolean" required>
+  Whether the packet was successfully decrypted at receive time.
+</ResponseField>
+
+<ResponseField name="decrypted_info" type="object | null">
+  Present when `decrypted` is `true`.
+  <Expandable title="properties">
+    <ResponseField name="channel_name" type="string | null">Channel name if decrypted as a channel message.</ResponseField>
+    <ResponseField name="sender" type="string | null">Sender name from the decrypted payload.</ResponseField>
+    <ResponseField name="channel_key" type="string | null">Channel key used for decryption.</ResponseField>
+    <ResponseField name="contact_key" type="string | null">Contact key if decrypted as a DM.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<Warning>
+Use `observation_id` as the key for rendering and deduplicating entries in a live packet feed. The `id` field is the database storage reference and may be shared by multiple arrivals of the same payload.
+</Warning>
+
+---
+
+### `channel`
+
+Sent when a channel is created or updated — including when the flood-scope override or path-hash-mode override changes locally, so clients can reflect those state changes without a full refetch.
+
+The payload is a full `Channel` object:
+
+<ResponseField name="key" type="string" required>32-character hex channel key.</ResponseField>
+<ResponseField name="name" type="string" required>Channel display name.</ResponseField>
+<ResponseField name="is_hashtag" type="boolean" required>Whether the channel was created from a `#name` hash.</ResponseField>
+<ResponseField name="on_radio" type="boolean" required>Whether the channel is currently loaded in the radio.</ResponseField>
+<ResponseField name="flood_scope_override" type="string | null">Per-channel outbound flood scope, or `null` to use the global app setting.</ResponseField>
+<ResponseField name="path_hash_mode_override" type="number | null">Per-channel path hash mode (0/1/2), or `null` to use the radio default.</ResponseField>
+<ResponseField name="last_read_at" type="number | null">Server-side Unix timestamp of the last read event for this channel.</ResponseField>
+<ResponseField name="favorite" type="boolean" required>Whether this channel is marked as a favorite.</ResponseField>
+
+---
+
+### `channel_deleted`
+
+Sent when a channel is removed from the database.
+
+<ResponseField name="key" type="string" required>
+  The 32-character hex key of the deleted channel.
+</ResponseField>
+
+---
+
+### `error`
+
+Sent as a toast notification for operator-actionable errors: reconnect failures, missing private keys, stuck radio startup, and similar conditions.
+
+<ResponseField name="message" type="string" required>
+  Short summary of the error.
+</ResponseField>
+
+<ResponseField name="details" type="string">
+  Optional extended description.
+</ResponseField>
+
+---
+
+### `success`
+
+Sent as a toast notification when a background operation completes successfully, such as a historical packet decrypt sweep.
+
+<ResponseField name="message" type="string" required>
+  Summary of the completed operation.
+</ResponseField>
+
+<ResponseField name="details" type="string">
+  Optional extended description.
+</ResponseField>
+
+---
+
+## JavaScript example
+
+```javascript
+const ws = new WebSocket('ws://localhost:8000/api/ws');
+
+ws.addEventListener('open', () => {
+  console.log('Connected');
+  // Load initial state via REST
+  fetch('/api/contacts').then(r => r.json()).then(contacts => { /* ... */ });
+  fetch('/api/channels').then(r => r.json()).then(channels => { /* ... */ });
+});
+
+ws.addEventListener('message', (event) => {
+  const { type, data } = JSON.parse(event.data);
+
+  switch (type) {
+    case 'health':
+      console.log('Radio connected:', data.connected);
+      break;
+    case 'message':
+      console.log('New message:', data.text, 'from', data.sender_name);
+      break;
+    case 'raw_packet':
+      // Use observation_id as the render key, not id
+      renderPacket(data.observation_id, data);
+      break;
+    case 'contact':
+      upsertContact(data);
+      break;
+    case 'contact_resolved':
+      replaceContactKey(data.previous_public_key, data.contact);
+      break;
+    case 'contact_deleted':
+      removeContact(data.public_key);
+      break;
+    case 'channel':
+      upsertChannel(data);
+      break;
+    case 'channel_deleted':
+      removeChannel(data.key);
+      break;
+    case 'error':
+      showToast('error', data.message);
+      break;
+  }
+});
+
+// Keepalive
+setInterval(() => {
+  if (ws.readyState === WebSocket.OPEN) ws.send('ping');
+}, 30_000);
+```

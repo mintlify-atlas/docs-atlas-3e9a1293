@@ -1,0 +1,138 @@
+---
+title: "Advanced setup: systemd, sub-path proxy, and TLS"
+description: "Install RemoteTerm as a persistent systemd service, configure a reverse proxy sub-path, and set up TLS for secure browser access and WebGPU features."
+---
+
+RemoteTerm supports several deployment patterns beyond the basic `uv run uvicorn` launch: a systemd service for persistent Linux operation, a reverse proxy sub-path for integrating with existing infrastructure, a prebuilt frontend for low-resource hardware, and a set of environment variables for tuning contact loading and channel slot behavior.
+
+## systemd service (Linux)
+
+The systemd installer is the recommended way to run RemoteTerm persistently on Linux. The service starts on boot, restarts automatically on failure, and runs as your current user — no separate service account or path configuration is required.
+
+<Steps>
+  <Step title="Run the installer">
+    From your repo checkout, run:
+
+    ```bash
+    bash scripts/setup/install_service.sh
+    ```
+
+    The installer prompts you for your transport type and any authentication settings, writes a systemd unit file, reloads the daemon, and starts the service. A quick-reference cheatsheet is printed at the end.
+  </Step>
+
+  <Step title="Verify the service is running">
+    ```bash
+    systemctl status remoteterm-meshcore
+    ```
+  </Step>
+</Steps>
+
+You can rerun the installer at any time to change transport, bot, or auth settings. If the service is already running, the installer stops it, rewrites the unit file, reloads systemd, and starts it again with the new configuration.
+
+### Common systemd commands
+
+```bash
+# Start, stop, or restart the service
+systemctl start remoteterm-meshcore
+systemctl stop remoteterm-meshcore
+systemctl restart remoteterm-meshcore
+
+# Follow live logs
+journalctl -u remoteterm-meshcore -f
+
+# Check current status
+systemctl status remoteterm-meshcore
+
+# Enable or disable start on boot
+systemctl enable remoteterm-meshcore
+systemctl disable remoteterm-meshcore
+```
+
+## Sub-path reverse proxy
+
+RemoteTerm can run behind a reverse proxy at a sub-path such as `/meshcore/`. All frontend assets and API paths are relative, so they resolve correctly under any prefix.
+
+<Warning>
+  The sub-path URL must have a trailing slash. If a user visits `/meshcore` without the slash, relative paths will break. Configure your proxy to redirect the no-slash URL to the slash variant.
+</Warning>
+
+### nginx configuration
+
+Use a `location` block with a trailing slash. The block below proxies RemoteTerm running locally on port 8000 under the `/meshcore/` prefix:
+
+```nginx
+location /meshcore/ {
+    proxy_pass http://127.0.0.1:8000/;
+
+    proxy_set_header X-Forwarded-Prefix /meshcore;
+    proxy_set_header X-Forwarded-Proto  $scheme;
+    proxy_set_header X-Forwarded-Host   $host;
+    proxy_set_header Host               $host;
+}
+```
+
+The `X-Forwarded-Prefix` header tells RemoteTerm what prefix is in use so it can generate correct `start_url` and `scope` values in the web manifest — required for PWA install to work under a sub-path. `X-Forwarded-Proto` and `X-Forwarded-Host` are used for origin resolution.
+
+<Note>
+  The trailing slash in `location /meshcore/ { ... }` is what ensures nginx strips the prefix before proxying and that nginx itself redirects the no-slash URL. Omitting it changes nginx's matching and stripping behavior in ways that break relative path resolution.
+</Note>
+
+## Prebuilt frontend
+
+On lightweight hardware (such as a Raspberry Pi) or when you want to avoid installing Node.js, you can fetch a prebuilt frontend instead of building it locally.
+
+```bash
+python3 scripts/setup/fetch_prebuilt_frontend.py
+```
+
+The script downloads the prebuilt frontend for the current release and unpacks it into `frontend/prebuilt`. Start the server normally:
+
+```bash
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+If `frontend/dist` is absent, the server falls back to `frontend/prebuilt` automatically. If neither directory is present, the server starts but serves API routes only, with no frontend static files.
+
+## Contact loading and radio capacity
+
+RemoteTerm loads contacts onto the radio so the radio can automatically acknowledge incoming direct messages. The contact loading behavior is controlled by the `max_radio_contacts` setting (configured in **Settings > Radio**) and a set of occupancy thresholds:
+
+- **Favorites load first**, then non-favorites fill to approximately **80% of `max_radio_contacts`**.
+- A **periodic offload** triggers once occupancy reaches approximately **95%**, clearing stale contacts to make room.
+- If the radio contact table is already full (from contacts added by advertisements or another client), the app may not be able to load all desired contacts.
+
+<AccordionGroup>
+  <Accordion title="Resolving a full contact table">
+    If you see a warning that auto-DM acking may not work for all contacts, you have three options:
+
+    - **Clear the radio's contact table** using another MeshCore client such as the official companion app, then restart RemoteTerm.
+    - **Lower `max_radio_contacts`** in **Settings > Radio** to reduce how many contacts the app tries to maintain.
+    - **Enable autoevict mode** (see below) to let the radio make room automatically.
+
+    Sending and receiving messages is never affected by a full contact table — only automatic DM acknowledgement is impacted.
+  </Accordion>
+
+  <Accordion title="Autoevict mode">
+    Setting `MESHCORE_LOAD_WITH_AUTOEVICT=true` enables an alternative contact loading strategy that avoids `TABLE_FULL` errors entirely.
+
+    When autoevict is on, RemoteTerm enables the radio's `AUTO_ADD_OVERWRITE_OLDEST` preference on connect. The radio then automatically evicts the oldest non-favorite contact when the table is full, so contact adds never fail. This also allows blind loading when `get_contacts` fails (common on slow BLE connections with large tables).
+
+    **Trade-off:** Contacts loaded by the app are not marked as radio-side favorites, so they are eviction candidates when the radio table is full and a new advertisement arrives. In practice, freshly-loaded contacts have a recent `lastmod` timestamp and are among the last to be evicted. If you disconnect the radio from RemoteTerm and use it standalone, your contacts will not be protected from eviction by newer advertisements.
+  </Accordion>
+</AccordionGroup>
+
+## Channel slot management
+
+RemoteTerm maintains a session-local LRU slot cache for channel assignments. When you send a channel message, the server reuses the previously loaded slot for that channel rather than reconfiguring the radio each time.
+
+<Note>
+  TCP radios are an exception: because this backend does not have exclusive device access over TCP, channel sends always force `set_channel(...)` before every send, regardless of the cache.
+</Note>
+
+If you observe channel sends appearing to use the wrong slot — for example because another client is changing channel slots underneath RemoteTerm — set `MESHCORE_FORCE_CHANNEL_SLOT_RECONFIGURE=true`. This disables slot reuse on all transports and forces a `set_channel(...)` call before every channel send. It adds approximately 500 ms of latency per channel send but ensures the correct slot is always set.
+
+Channel slot mismatches are logged, surfaced as a toast in the UI, and automatically reset the send-slot cache.
+
+<Tip>
+  If you only see the issue intermittently and want to avoid the latency penalty, try enabling `MESHCORE_ENABLE_MESSAGE_POLL_FALLBACK=true` first. This switches the hourly radio audit to 10-second polling and includes a channel-slot drift check, which will detect and recover from most slot mismatches without forcing a reconfigure on every send.
+</Tip>

@@ -1,0 +1,297 @@
+---
+title: 'Contacts API: manage nodes, routing, and repeaters'
+description: 'All /api/contacts endpoints for contact CRUD, routing overrides, path discovery, trace, and repeater and room server management commands.'
+---
+
+The contacts API manages every node known to RemoteTerm — clients, repeaters, rooms, and sensors. Contacts are stored in a local SQLite database and can hold far more entries than the radio's own contact table (~350 vs. the radio's hardware limit). The backend automatically syncs priority contacts back to the radio for DM routing. All routing decisions are computed server-side and exposed as canonical fields — do not reconstruct route precedence from raw path fields.
+
+## Contact types
+
+| Value | Type |
+|---|---|
+| `0` | Unknown |
+| `1` | Client (regular mesh node) |
+| `2` | Repeater |
+| `3` | Room server |
+| `4` | Sensor |
+
+## Public key format
+
+Full keys are 64-character lowercase hex strings. The API also accepts 12-character prefixes in path parameters — lookups use `LIKE 'prefix%'` internally. If a prefix matches more than one contact, the server returns `409 Conflict` and prompts you to use a full key.
+
+<Note>
+Prefer full 64-character keys in programmatic usage. Prefix matching is a convenience for interactive tools and CLI scripts.
+</Note>
+
+---
+
+## GET /api/contacts
+
+Lists contacts from the local database.
+
+<ParamField query="limit" type="number" default="100">
+  Maximum number of contacts to return (1–1000).
+</ParamField>
+
+<ParamField query="offset" type="number" default="0">
+  Pagination offset.
+</ParamField>
+
+```bash
+curl "http://localhost:8000/api/contacts?limit=50"
+```
+
+Each contact includes backend-computed routing fields:
+
+<ResponseField name="public_key" type="string" required>64-char hex public key.</ResponseField>
+<ResponseField name="name" type="string | null">Display name.</ResponseField>
+<ResponseField name="type" type="number" required>Contact type code (0–4).</ResponseField>
+<ResponseField name="lat" type="number | null">Latitude from most recent advert.</ResponseField>
+<ResponseField name="lon" type="number | null">Longitude from most recent advert.</ResponseField>
+<ResponseField name="last_seen" type="number | null">Unix timestamp of last observation.</ResponseField>
+<ResponseField name="first_seen" type="number | null">Unix timestamp of first observation.</ResponseField>
+<ResponseField name="on_radio" type="boolean" required>Whether currently loaded in the radio's contact table.</ResponseField>
+<ResponseField name="favorite" type="boolean" required>Whether marked as a favorite (favorites are loaded onto the radio first).</ResponseField>
+<ResponseField name="effective_route" type="object" required>
+  Backend-computed effective route for outgoing DMs.
+  <Expandable title="properties">
+    <ResponseField name="path" type="string">Hex-encoded path bytes.</ResponseField>
+    <ResponseField name="path_len" type="number">Hop count (-1=flood, 0=direct, >0=explicit).</ResponseField>
+    <ResponseField name="path_hash_mode" type="number">Hop width mode (0/1/2).</ResponseField>
+  </Expandable>
+</ResponseField>
+<ResponseField name="effective_route_source" type="string" required>`"override"`, `"direct"`, or `"flood"`.</ResponseField>
+<ResponseField name="direct_route" type="object | null">Learned direct route from radio sync or path discovery.</ResponseField>
+<ResponseField name="route_override" type="object | null">Explicit routing override, if set.</ResponseField>
+
+---
+
+## GET /api/contacts/analytics
+
+Returns a unified analytics payload for either a keyed contact or a name-only sender lookup.
+
+<ParamField query="public_key" type="string">
+  Full or prefix contact public key. Exactly one of `public_key` or `name` must be provided.
+</ParamField>
+
+<ParamField query="name" type="string">
+  Sender display name for name-only lookups. Returns channel message stats without direct message data.
+</ParamField>
+
+The response includes name history, DM and channel message counts, most active channels, advertisement paths, advert frequency, nearest repeaters (inferred from first-hop advert paths), and hourly/weekly activity time series.
+
+---
+
+## GET /api/contacts/repeaters/advert-paths
+
+Returns recent unique advertisement paths for all contacts. Useful for building topology visualizations and repeater analytics.
+
+<ParamField query="limit_per_repeater" type="number" default="10">
+  Maximum paths to return per contact (1–50).
+</ParamField>
+
+---
+
+## POST /api/contacts
+
+Creates a new contact or updates an existing one's name. Triggers prefix contact promotion and, optionally, historical DM decryption.
+
+<ParamField body="public_key" type="string" required>
+  Full 64-character hex public key.
+</ParamField>
+
+<ParamField body="name" type="string">
+  Display name to assign. Updates the name if the contact already exists.
+</ParamField>
+
+<ParamField body="try_historical" type="boolean" default="false">
+  When `true`, kicks off a background sweep to decrypt any stored encrypted DM packets from this contact using the current keystore.
+</ParamField>
+
+```bash
+curl -X POST http://localhost:8000/api/contacts \
+  -H "Content-Type: application/json" \
+  -d '{
+    "public_key": "aabbccdd...64chars...",
+    "name": "Alice",
+    "try_historical": true
+  }'
+```
+
+---
+
+## POST /api/contacts/bulk-delete
+
+Deletes multiple contacts at once. Removes each contact from the radio if it is currently loaded, then deletes from the database. Broadcasts `contact_deleted` for each.
+
+<ParamField body="public_keys" type="string[]" required>
+  List of full 64-character public keys to delete.
+</ParamField>
+
+```bash
+curl -X POST http://localhost:8000/api/contacts/bulk-delete \
+  -H "Content-Type: application/json" \
+  -d '{"public_keys": ["aabbccdd...", "11223344..."]}'
+```
+
+```json
+{ "deleted": 2 }
+```
+
+---
+
+## DELETE /api/contacts/{public_key}
+
+Deletes a single contact. Removes the contact from the radio if present, then deletes from the database.
+
+<ParamField path="public_key" type="string" required>
+  Full 64-char hex key or a 12-char prefix (must resolve uniquely).
+</ParamField>
+
+```bash
+curl -X DELETE http://localhost:8000/api/contacts/aabbccdd1234
+```
+
+---
+
+## POST /api/contacts/{public_key}/mark-read
+
+Marks the DM conversation with this contact as read by updating `last_read_at` on the server.
+
+<ParamField path="public_key" type="string" required>
+  Full or prefix contact public key.
+</ParamField>
+
+---
+
+## POST /api/contacts/{public_key}/command
+
+Sends a raw CLI command to a repeater and returns the response.
+
+<ParamField path="public_key" type="string" required>
+  Repeater public key.
+</ParamField>
+
+<ParamField body="command" type="string" required>
+  CLI command string to send.
+</ParamField>
+
+---
+
+## POST /api/contacts/{public_key}/routing-override
+
+Sets, forces, or clears an explicit routing override for a contact. The override takes precedence over the learned direct route when sending DMs.
+
+<ParamField path="public_key" type="string" required>
+  Contact public key.
+</ParamField>
+
+<ParamField body="route" type="string" required>
+  Routing instruction:
+  - `""` — clear the override, fall back to learned direct route or flood
+  - `"-1"` — force flood routing regardless of any known direct route
+  - `"0"` — force direct (zero-hop) routing
+  - Comma-separated 1/2/3-byte hop hex values — explicit multi-hop path (e.g. `"ab,cd,ef"`)
+</ParamField>
+
+```bash
+# Force flood
+curl -X POST http://localhost:8000/api/contacts/aabbccdd1234/routing-override \
+  -H "Content-Type: application/json" \
+  -d '{"route": "-1"}'
+
+# Clear override
+curl -X POST http://localhost:8000/api/contacts/aabbccdd1234/routing-override \
+  -H "Content-Type: application/json" \
+  -d '{"route": ""}'
+```
+
+---
+
+## POST /api/contacts/{public_key}/trace
+
+Sends a direct (zero-hop) trace to a contact and returns SNR data from the round-trip. Uses a 4-byte contact hash for precise targeting.
+
+<ParamField path="public_key" type="string" required>
+  Contact public key.
+</ParamField>
+
+<ResponseField name="remote_snr" type="number | null">
+  SNR at which the target heard us (dB).
+</ResponseField>
+
+<ResponseField name="local_snr" type="number | null">
+  SNR at which we heard the bounce-back (dB).
+</ResponseField>
+
+<ResponseField name="path_len" type="number" required>
+  Number of hops in the trace path.
+</ResponseField>
+
+---
+
+## POST /api/contacts/{public_key}/path-discovery
+
+Sends a path-discovery request to a contact and waits for a PATH_RESPONSE event. Persists the learned forward path as the contact's direct route, then syncs the updated route back to the radio.
+
+<ParamField path="public_key" type="string" required>
+  Contact public key.
+</ParamField>
+
+<ResponseField name="contact" type="object" required>
+  Updated contact row with the newly learned direct path.
+</ResponseField>
+
+<ResponseField name="forward_path" type="object" required>
+  Route from the local radio to the target.
+  <Expandable title="properties">
+    <ResponseField name="path" type="string">Hex-encoded path bytes.</ResponseField>
+    <ResponseField name="path_len" type="number">Hop count.</ResponseField>
+    <ResponseField name="path_hash_mode" type="number">Hop identifier width mode.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="return_path" type="object" required>
+  Route from the target back to the local radio (informational only; not used for outgoing DMs).
+</ResponseField>
+
+---
+
+## Repeater management endpoints
+
+All repeater endpoints require the contact to be a type `2` (repeater). They send the corresponding CLI command to the repeater over the mesh and return parsed telemetry.
+
+| Method | Endpoint | Description |
+|---|---|---|
+| POST | `/api/contacts/{key}/repeater/login` | Log in to a repeater. Body: `{"password": ""}`. |
+| POST | `/api/contacts/{key}/repeater/status` | Fetch full status telemetry (battery, packets, airtime, SNR, uptime, etc.). |
+| POST | `/api/contacts/{key}/repeater/lpp-telemetry` | Fetch CayenneLPP sensor data. |
+| POST | `/api/contacts/{key}/repeater/neighbors` | Fetch the repeater's current neighbor list. |
+| POST | `/api/contacts/{key}/repeater/acl` | Fetch the repeater's access control list. |
+| POST | `/api/contacts/{key}/repeater/node-info` | Fetch name, GPS coordinates, and clock. |
+| POST | `/api/contacts/{key}/repeater/radio-settings` | Fetch radio parameters via CLI. |
+| POST | `/api/contacts/{key}/repeater/advert-intervals` | Fetch advertisement interval settings. |
+| POST | `/api/contacts/{key}/repeater/owner-info` | Fetch owner info and guest password. |
+| GET | `/api/contacts/{key}/repeater/telemetry-history` | Return stored time-series telemetry snapshots (no radio access). |
+
+```bash
+# Get repeater status
+curl -X POST http://localhost:8000/api/contacts/aabbccdd1234/repeater/status
+```
+
+---
+
+## Room server endpoints
+
+Room server endpoints require a type `3` (room) contact.
+
+| Method | Endpoint | Description |
+|---|---|---|
+| POST | `/api/contacts/{key}/room/login` | Log in to a room server. |
+| POST | `/api/contacts/{key}/room/status` | Fetch room-server status telemetry. |
+| POST | `/api/contacts/{key}/room/lpp-telemetry` | Fetch CayenneLPP sensor data. |
+| POST | `/api/contacts/{key}/room/acl` | Fetch the room server's ACL entries. |
+
+<Tip>
+After a successful `repeater/login`, subsequent management commands within the same session do not require re-authentication unless the repeater enforces per-command auth.
+</Tip>

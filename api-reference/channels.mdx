@@ -1,0 +1,244 @@
+---
+title: 'Channels API: create, manage, and configure channels'
+description: 'All /api/channels endpoints for channel CRUD, flood-scope and path-hash-mode overrides, bulk hashtag creation, and per-channel read state.'
+---
+
+The channels API manages the set of MeshCore channel keys known to RemoteTerm. Channels are stored locally in SQLite; they are **not** pushed to the radio on creation. Channels are loaded into the radio's slot table automatically at send time via a session-local LRU cache. This means you can store far more channels than the radio's hardware slot limit and they will be loaded on demand when you send to them.
+
+## Channel key format
+
+Channel keys are 32-character hex strings (16 bytes). They serve as the database primary key and the lookup key in all `/api/channels/{key}` paths.
+
+### Hashtag channels
+
+For channels created with a `#name` convention, the key is derived automatically:
+
+```
+key = SHA256("#name".encode("utf-8"))[:16].hex().upper()
+```
+
+You can compute this client-side and use the resulting key directly with `POST /api/channels`, or use the `POST /api/channels/bulk-hashtag` endpoint which handles normalization for you.
+
+<Note>
+The canonical "Public" channel has a fixed key defined by the MeshCore firmware. Attempting to delete it or assign a different key returns `400`.
+</Note>
+
+---
+
+## GET /api/channels
+
+Returns all channels in the local database.
+
+```bash
+curl http://localhost:8000/api/channels
+```
+
+<ResponseField name="key" type="string" required>32-char hex channel key.</ResponseField>
+<ResponseField name="name" type="string" required>Channel display name.</ResponseField>
+<ResponseField name="is_hashtag" type="boolean" required>Whether this channel was created from a `#name` hash.</ResponseField>
+<ResponseField name="on_radio" type="boolean" required>Whether the channel is currently in the radio's slot table.</ResponseField>
+<ResponseField name="flood_scope_override" type="string | null">Per-channel outbound flood scope override, or `null` to use the global app setting.</ResponseField>
+<ResponseField name="path_hash_mode_override" type="number | null">Per-channel path hash mode (0=1-byte, 1=2-byte, 2=3-byte), or `null` to use the radio default.</ResponseField>
+<ResponseField name="last_read_at" type="number | null">Server-side Unix timestamp of the last read event.</ResponseField>
+<ResponseField name="favorite" type="boolean" required>Whether this channel is marked as a favorite.</ResponseField>
+
+---
+
+## GET /api/channels/{key}/detail
+
+Returns a comprehensive channel profile with message statistics.
+
+<ParamField path="key" type="string" required>
+  32-char hex channel key.
+</ParamField>
+
+<ResponseField name="channel" type="object" required>
+  Full Channel object (same as `GET /api/channels` entries).
+</ResponseField>
+
+<ResponseField name="message_counts" type="object" required>
+  Time-windowed message counts.
+  <Expandable title="properties">
+    <ResponseField name="last_1h" type="number">Messages in the last hour.</ResponseField>
+    <ResponseField name="last_24h" type="number">Messages in the last 24 hours.</ResponseField>
+    <ResponseField name="last_48h" type="number">Messages in the last 48 hours.</ResponseField>
+    <ResponseField name="last_7d" type="number">Messages in the last 7 days.</ResponseField>
+    <ResponseField name="all_time" type="number">Total messages ever stored.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="first_message_at" type="number | null">
+  Unix timestamp of the oldest stored message on this channel.
+</ResponseField>
+
+<ResponseField name="unique_sender_count" type="number" required>
+  Number of distinct sender names observed.
+</ResponseField>
+
+<ResponseField name="top_senders_24h" type="array" required>
+  Top senders in the last 24 hours.
+  <Expandable title="properties">
+    <ResponseField name="sender_name" type="string">Display name.</ResponseField>
+    <ResponseField name="sender_key" type="string | null">Public key when known.</ResponseField>
+    <ResponseField name="message_count" type="number">Message count in the window.</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="path_hash_width_24h" type="object" required>
+  Distribution of hop byte widths across packets parsed in the last 24 hours. Useful for diagnosing mixed-mode networks.
+</ResponseField>
+
+---
+
+## POST /api/channels
+
+Creates a channel in the local database. The channel is not pushed to the radio; it will be loaded automatically when you first send a message to it.
+
+<ParamField body="name" type="string" required>
+  Channel display name (1–32 characters). If the name starts with `#`, the key is derived automatically.
+</ParamField>
+
+<ParamField body="key" type="string">
+  32-char hex channel key (16 bytes). Optional for hashtag channels — if omitted, the key is derived from the name hash. Required for non-hashtag channels unless the name implies a key.
+</ParamField>
+
+```bash
+curl -X POST http://localhost:8000/api/channels \
+  -H "Content-Type: application/json" \
+  -d '{"name": "#emergencycomms"}'
+```
+
+```bash
+curl -X POST http://localhost:8000/api/channels \
+  -H "Content-Type: application/json" \
+  -d '{"name": "PrivateNet", "key": "0a1b2c3d4e5f60718293a4b5c6d7e8f9"}'
+```
+
+---
+
+## POST /api/channels/bulk-hashtag
+
+Creates multiple hashtag channels at once. Leading `#` is optional per entry. Names are normalized, validated (alphanumeric and hyphens only, max 31 chars after stripping `#`), and deduplicated before creation. Optionally triggers a background historical decrypt sweep for newly created channels.
+
+<ParamField body="channel_names" type="string[]" required>
+  List of hashtag channel names. `#` prefix is optional per entry.
+</ParamField>
+
+<ParamField body="try_historical" type="boolean" default="false">
+  When `true`, starts a background sweep to decrypt stored encrypted packets against the newly created channel keys. Returns `202 Accepted` if decryption was started.
+</ParamField>
+
+<ResponseField name="created_channels" type="array" required>
+  List of newly created Channel objects.
+</ResponseField>
+
+<ResponseField name="existing_count" type="number" required>
+  Number of names that already existed and were skipped.
+</ResponseField>
+
+<ResponseField name="invalid_names" type="array" required>
+  Names that failed validation.
+</ResponseField>
+
+<ResponseField name="decrypt_started" type="boolean" required>
+  Whether a background historical decrypt was started.
+</ResponseField>
+
+<ResponseField name="decrypt_total_packets" type="number" required>
+  Number of undecrypted packets queued for the sweep.
+</ResponseField>
+
+```bash
+curl -X POST http://localhost:8000/api/channels/bulk-hashtag \
+  -H "Content-Type: application/json" \
+  -d '{
+    "channel_names": ["emergency", "#local-nets", "wx"],
+    "try_historical": true
+  }'
+```
+
+---
+
+## DELETE /api/channels/{key}
+
+Deletes a channel from the local database. Returns `200 {"status": "ok"}` even if the key did not exist.
+
+<Warning>
+The canonical Public channel cannot be deleted. Attempting to do so returns `400`.
+</Warning>
+
+<ParamField path="key" type="string" required>
+  32-char hex channel key.
+</ParamField>
+
+```bash
+curl -X DELETE http://localhost:8000/api/channels/0a1b2c3d4e5f60718293a4b5c6d7e8f9
+```
+
+<Note>
+The `200` response for non-existent keys is intentional. The postcondition "channel does not exist" is satisfied regardless of whether it existed before the request.
+</Note>
+
+---
+
+## POST /api/channels/{key}/flood-scope-override
+
+Sets or clears a per-channel regional flood scope override. When set, channel sends temporarily switch the radio's flood scope to this value for the duration of the send, then restore the global app setting.
+
+<ParamField path="key" type="string" required>
+  32-char hex channel key.
+</ParamField>
+
+<ParamField body="flood_scope_override" type="string" required>
+  Region scope string to apply on channel sends. Pass an empty string `""` to clear the override and revert to the global setting.
+</ParamField>
+
+```bash
+# Set override
+curl -X POST http://localhost:8000/api/channels/0a1b2c3d.../flood-scope-override \
+  -H "Content-Type: application/json" \
+  -d '{"flood_scope_override": "US-CA"}'
+
+# Clear override
+curl -X POST http://localhost:8000/api/channels/0a1b2c3d.../flood-scope-override \
+  -H "Content-Type: application/json" \
+  -d '{"flood_scope_override": ""}'
+```
+
+---
+
+## POST /api/channels/{key}/path-hash-mode-override
+
+Sets or clears a per-channel path hash mode override. When set, channel sends temporarily switch the radio's path hash mode to this value, then restore the radio default.
+
+<ParamField path="key" type="string" required>
+  32-char hex channel key.
+</ParamField>
+
+<ParamField body="path_hash_mode_override" type="number | null" required>
+  Path hash mode to use for this channel: `0`=1-byte, `1`=2-byte, `2`=3-byte. Pass `null` to clear the override and use the radio default.
+</ParamField>
+
+```bash
+curl -X POST http://localhost:8000/api/channels/0a1b2c3d.../path-hash-mode-override \
+  -H "Content-Type: application/json" \
+  -d '{"path_hash_mode_override": 1}'
+```
+
+---
+
+## POST /api/channels/{key}/mark-read
+
+Marks a channel as read by updating the server-side `last_read_at` timestamp.
+
+<ParamField path="key" type="string" required>
+  32-char hex channel key.
+</ParamField>
+
+```bash
+curl -X POST http://localhost:8000/api/channels/0a1b2c3d.../mark-read
+```
+
+```json
+{ "status": "ok", "key": "0a1b2c3d4e5f60718293a4b5c6d7e8f9" }
+```

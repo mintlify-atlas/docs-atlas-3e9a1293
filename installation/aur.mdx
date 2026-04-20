@@ -1,0 +1,79 @@
+---
+title: "Install RemoteTerm on Arch Linux using the AUR package"
+description: "Install remoteterm-meshcore from the AUR with yay or makepkg, configure your radio transport, and enable the systemd service for autostart."
+---
+
+RemoteTerm is packaged for Arch Linux in the AUR as [`remoteterm-meshcore`](https://aur.archlinux.org/packages/remoteterm-meshcore). The package installs the backend, frontend, a systemd service unit, and an environment file where you configure your radio connection. This is the recommended installation method for Arch Linux users who want RemoteTerm to start automatically on boot.
+
+## Install the package
+
+Install `remoteterm-meshcore` using your preferred AUR helper or by building manually with `makepkg`.
+
+<CodeGroup>
+
+```bash yay
+yay -S remoteterm-meshcore
+```
+
+```bash makepkg (manual)
+git clone https://aur.archlinux.org/remoteterm-meshcore.git
+cd remoteterm-meshcore
+makepkg -si
+```
+
+</CodeGroup>
+
+## Configure your radio connection
+
+After installation, edit the environment file to set your transport and any other options:
+
+```bash
+sudo vi /etc/remoteterm-meshcore/remoteterm.env
+```
+
+The environment file is where you set variables like `MESHCORE_SERIAL_PORT`, `MESHCORE_TCP_HOST`, or `MESHCORE_BLE_ADDRESS` to tell RemoteTerm how to connect to your radio. Only one transport may be active at a time.
+
+<Note>
+  For the full list of supported environment variables and what they do, see the [configuration reference](/configuration/environment-variables). Key variables include transport settings (`MESHCORE_SERIAL_PORT`, `MESHCORE_TCP_HOST`, `MESHCORE_BLE_ADDRESS`), security options (`MESHCORE_BASIC_AUTH_USERNAME`, `MESHCORE_BASIC_AUTH_PASSWORD`, `MESHCORE_DISABLE_BOTS`), and logging (`MESHCORE_LOG_LEVEL`).
+</Note>
+
+## Enable and start the service
+
+Enable the systemd service so RemoteTerm starts automatically on boot, and start it immediately:
+
+```bash
+sudo systemctl enable --now remoteterm-meshcore
+```
+
+## Access the interface
+
+Once the service is running, open your browser and navigate to:
+
+```
+http://localhost:8000
+```
+
+A live API explorer is available at `http://localhost:8000/docs`.
+
+## Managing the service
+
+Common service management commands:
+
+```bash
+# Check status and recent logs
+sudo systemctl status remoteterm-meshcore
+
+# View full logs
+journalctl -u remoteterm-meshcore -f
+
+# Restart after changing the environment file
+sudo systemctl restart remoteterm-meshcore
+
+# Stop the service
+sudo systemctl stop remoteterm-meshcore
+
+# Disable autostart
+sudo systemctl disable remoteterm-meshcore
+```
+
+After editing `/etc/remoteterm-meshcore/remoteterm.env`, restart the service for the changes to take effect.

@@ -1,0 +1,98 @@
+---
+title: "Packet capture, store-and-decrypt, and key cracking"
+description: "RemoteTerm stores every raw RF packet in SQLite, decrypts retroactively when keys are added, and ships a WebGPU brute-force cracker for unknown channels."
+---
+
+RemoteTerm captures every RF packet that the radio receives and stores it in SQLite, independent of whether the packet can be decrypted at the time of arrival. This store-and-decrypt model means you never permanently lose a message just because you didn't have the key when it arrived — you can add the key later and recover the content from the historical archive.
+
+## Raw packet storage
+
+Every packet received over the air is stored in the `raw_packets` table with two distinct identifiers:
+
+<CardGroup cols={2}>
+  <Card title="Storage identity (id)" icon="database">
+    The row ID derived from a hash of the packet payload, **excluding** path bytes. Two arrivals of the same payload via different repeater routes share one stored row.
+  </Card>
+  <Card title="Arrival identity (observation_id)" icon="eye">
+    A unique identifier generated per RF arrival. Two path-diverse copies of the same payload produce two `observation_id` values but one `id`.
+  </Card>
+</CardGroup>
+
+The deduplication policy is intentional: storage is payload-identity-based so the database doesn't grow with every echo, while the real-time packet feed uses `observation_id` so every path-diverse arrival is visible in-session.
+
+The raw packet WebSocket event (`raw_packet`) fires once per RF arrival with both `id` and `observation_id`. If you are building a custom client or integration, key your packet feed renderer on `observation_id` and use `id` only as a storage reference.
+
+## Store-and-decrypt
+
+<Note>
+  Encrypted packets are retained even when no matching key is available at the time of arrival. When you later add a channel key or the server loads the radio's private key, you can trigger retroactive decryption over the entire stored history. Packets you captured weeks ago can become readable today.
+</Note>
+
+To decrypt the historical archive after adding a new key:
+
+```bash
+POST /api/packets/decrypt/historical
+```
+
+To check how many packets are still waiting for a key:
+
+```bash
+GET /api/packets/undecrypted/count
+```
+
+When retroactive decryption completes, the backend broadcasts a `success` WebSocket event to notify connected clients.
+
+**Decryption sources:**
+- **Channel messages**: decrypted automatically when a matching channel key is stored.
+- **Direct messages**: decrypted server-side using the private key exported from the radio on startup. The key is held in memory only and never written to disk.
+
+## WebGPU channel key cracker
+
+RemoteTerm includes a browser-based brute-force tool for discovering channel keys for channels you don't have keys for yet. It searches for hashtag channel names — channels created from `SHA256("#name")` — by testing candidate names against stored undecrypted packets, running the search on your GPU via WebGPU.
+
+<Tip>
+  Set up HTTPS before trying the WebGPU cracker. The Web Cryptography API and WebGPU both require a secure context (HTTPS or localhost). The cracker will not be available on plain HTTP served over a network. See the advanced setup docs for HTTPS configuration options.
+</Tip>
+
+The cracker runs inside **CrackerPanel**, a globally collapsible panel in the RemoteTerm UI. It does not require any server-side configuration — the computation runs entirely in your browser using your local GPU.
+
+**Requirements for the cracker:**
+- An HTTPS connection (self-signed certificates work)
+- A browser with WebGPU support (Chrome 113+, Edge 113+)
+- Stored undecrypted packets to search against
+
+## Packet maintenance
+
+The raw packet table can grow large over time. Use the maintenance endpoint to remove old packets and vacuum the SQLite database:
+
+```bash
+POST /api/packets/maintenance
+```
+
+Packet retention is configurable. Run maintenance periodically or when disk usage becomes a concern.
+
+## Raw packet feed (radio aquarium)
+
+The real-time raw packet feed gives you a live view of every incoming RF packet as the radio hears it. It is useful for network observation, debugging, and capturing unusual traffic.
+
+Each packet in the feed shows:
+- `observation_id` — use this as the render/dedup key for the feed
+- `id` — storage row ID for database lookups
+- `raw` — the full hex-encoded packet payload
+- `timestamp` — arrival time
+- `decrypted_info` — when decryption succeeds, includes `channel_key`, `contact_key`, and `text`
+
+To fetch a specific stored packet by its row ID for on-demand inspection:
+
+```bash
+GET /api/packets/{packet_id}
+```
+
+<AccordionGroup>
+  <Accordion title="Why observation_id matters for the feed">
+    Because storage deduplicates by payload hash, the same message arriving via two repeater paths produces one `id` but two `observation_id` values. If the feed keyed on `id`, the second path-diverse copy would appear to be a duplicate and be suppressed. Keying on `observation_id` ensures every path-diverse RF arrival is visible in real time, which is often the interesting part when watching a mesh.
+  </Accordion>
+  <Accordion title="Relationship between raw packets and messages">
+    Raw packet storage and message-layer deduplication are independent systems. The `messages` table deduplicates channel echoes at the message level (same text + timestamp = one message row with an echo counter). The `raw_packets` table deduplicates at the payload level (same bytes = one row). A single channel message echo may create one message row with an incremented echo count, one raw packet row (if the payload is identical), and multiple `observation_id` events on the WebSocket.
+  </Accordion>
+</AccordionGroup>

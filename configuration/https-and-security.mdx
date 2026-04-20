@@ -1,0 +1,179 @@
+---
+title: "HTTPS and security configuration for RemoteTerm"
+description: "Enable HTTPS with self-signed or mkcert certs, configure HTTP Basic Auth, reverse proxy sub-path routing, and understand the bot execution security model."
+---
+
+RemoteTerm is designed for use on trusted networks — a home network, a LAN, or a VPN. It has no built-in user accounts, sessions, or per-feature permission system. This page covers the optional security controls available: HTTPS, HTTP Basic Auth, reverse proxy configuration, and the bot system's security model.
+
+<Warning>
+  Do not expose RemoteTerm to the public internet without additional access controls. The application's permissive CORS policy (`allow_origins=["*"]`) is an intentional design decision for trusted-network deployments, not a misconfiguration. See the sections below for the controls that are available.
+</Warning>
+
+## Security model
+
+RemoteTerm's security posture is intentionally minimal. The tradeoffs are deliberate:
+
+<CardGroup cols={2}>
+  <Card title="No user accounts" icon="user-slash">
+    There is no login system, no sessions, and no per-feature authorization. Access to the app is all-or-nothing.
+  </Card>
+  <Card title="Permissive CORS" icon="globe">
+    The backend accepts requests from any origin (`allow_origins=["*"]`). This lets you access your radio from any device on your network without configuration.
+  </Card>
+  <Card title="Optional Basic Auth" icon="lock">
+    A coarse app-wide HTTP Basic Auth gate is available. It must be paired with HTTPS — credentials are not safe over plain HTTP.
+  </Card>
+  <Card title="Bot code execution" icon="terminal">
+    The bot system executes user-provided Python via `exec()`. Anyone with access to the app can run arbitrary Python code through the bot API.
+  </Card>
+</CardGroup>
+
+If you need stronger access control, consider terminating access through a reverse proxy with its own authentication layer, or extending FastAPI with your own auth middleware. Full user management is outside the scope of this application.
+
+## HTTP Basic Auth
+
+HTTP Basic Auth provides a single coarse gate over the entire application, covering both HTTP and WebSocket endpoints. Enable it by setting both variables together at launch:
+
+```bash
+MESHCORE_BASIC_AUTH_USERNAME=alice MESHCORE_BASIC_AUTH_PASSWORD=correcthorsebatterystaple uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+<Warning>
+  Setting only one of `MESHCORE_BASIC_AUTH_USERNAME` or `MESHCORE_BASIC_AUTH_PASSWORD` causes the server to refuse to start. Both must be set together or neither should be set.
+</Warning>
+
+Basic Auth credentials are sent with every request in a base64-encoded header. Over plain HTTP, anyone on the network can decode them trivially. **Always pair Basic Auth with HTTPS.**
+
+Note that the app's permissive CORS policy means cross-origin JavaScript is not a reliable additional gate on top of Basic Auth. A browser on the same network can make credentialed cross-origin requests. HTTPS + Basic Auth is primarily useful for preventing casual unauthorized access and for protecting credentials in transit, not for strong isolation.
+
+## HTTPS setup
+
+HTTPS is required for:
+
+- **WebGPU channel key cracking** — browsers block WebGPU in non-secure contexts when not on `localhost`.
+- **Web Push notifications** — browser push subscriptions require a secure context.
+- **HTTP Basic Auth** — credentials are not safe over plain HTTP.
+
+### Self-signed certificate (quickstart)
+
+Generate a self-signed certificate and start the server with TLS:
+
+<Steps>
+  <Step title="Generate the certificate">
+    ```bash
+    openssl req -x509 -newkey rsa:4096 -keyout key.pem -out cert.pem -days 365 -nodes -subj '/CN=localhost'
+    ```
+
+    This creates `key.pem` (private key) and `cert.pem` (certificate) in the current directory.
+  </Step>
+  <Step title="Start the server with TLS">
+    ```bash
+    uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --ssl-keyfile=key.pem --ssl-certfile=cert.pem
+    ```
+  </Step>
+  <Step title="Accept the browser warning">
+    Your browser will show a security warning because the certificate is self-signed and not trusted by a CA. Accept the exception to proceed. The connection is still encrypted.
+
+    <Tip>
+      To avoid the browser warning permanently on your local network, use `mkcert` (see below) to generate a locally-trusted certificate.
+    </Tip>
+  </Step>
+</Steps>
+
+### Docker Compose with TLS
+
+If you are running via Docker Compose, generate the certificate on the host first, then mount it into the container and override the default launch command:
+
+```yaml
+services:
+  remoteterm:
+    volumes:
+      - ./data:/app/data
+      - ./cert.pem:/app/cert.pem:ro
+      - ./key.pem:/app/key.pem:ro
+    command: uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --ssl-keyfile=/app/key.pem --ssl-certfile=/app/cert.pem
+```
+
+The Docker setup script (`bash scripts/setup/install_docker.sh`) can generate a self-signed certificate automatically and produce a matching `docker-compose.yml` with these mounts pre-configured.
+
+### Locally-trusted certificates with mkcert
+
+[mkcert](https://github.com/FiloSottile/mkcert) installs a local CA into your system trust store and generates certificates trusted by your browser without warnings. This is the best option for long-term local development or home lab setups.
+
+```bash
+# Install mkcert (see https://github.com/FiloSottile/mkcert for platform instructions)
+mkcert -install
+mkcert localhost 127.0.0.1 ::1
+
+# Start RemoteTerm with the generated certificate
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 \
+  --ssl-keyfile=localhost+2-key.pem \
+  --ssl-certfile=localhost+2.pem
+```
+
+After running `mkcert -install`, browsers on the same machine trust certificates signed by your local CA without warnings.
+
+## Reverse proxy setup
+
+RemoteTerm supports being served under a sub-path (e.g. `/meshcore/` or a Home Assistant ingress path). All frontend asset and API paths are relative, so they resolve correctly under any prefix without configuration changes to the app.
+
+### Sub-path requirements
+
+<Note>
+  The proxy must ensure the sub-path URL has a **trailing slash**. If a user visits `/meshcore` without a trailing slash, relative paths in the frontend will resolve incorrectly. Most proxies handle redirects automatically; for Nginx, a `location /meshcore/ { ... }` block (note the trailing slash in the location pattern) does the right thing.
+</Note>
+
+For correct PWA install behavior, forward these headers from your proxy to RemoteTerm:
+
+| Header | Example value | Purpose |
+|---|---|---|
+| `X-Forwarded-Prefix` | `/meshcore` | Sub-path prefix for PWA `start_url` and `scope` generation |
+| `X-Forwarded-Proto` | `https` | Protocol for origin resolution |
+| `X-Forwarded-Host` | `myhost.local` | Hostname for origin resolution |
+
+### Nginx example
+
+```nginx
+location /meshcore/ {
+    proxy_pass http://127.0.0.1:8000/;
+    proxy_http_version 1.1;
+
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-Host $host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Prefix /meshcore;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+}
+```
+
+The `Upgrade` and `Connection` headers are required for WebSocket proxying.
+
+## Bot system security
+
+The bot system is a power-user feature that lets you run Python scripts that react to incoming messages and send automated replies. Bots are executed using Python's `exec()` built-in with full `__builtins__` access.
+
+<Warning>
+  **Anyone who can access the RemoteTerm UI can execute arbitrary Python code on the server through the bot API.** This is an intentional design decision, not an oversight. The README documents this explicitly. Do not run RemoteTerm on an untrusted network with bots enabled.
+</Warning>
+
+If you do not use the bot system and want to eliminate this risk, disable it entirely at startup:
+
+```bash
+MESHCORE_DISABLE_BOTS=true uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+When `MESHCORE_DISABLE_BOTS=true`:
+
+- No bot code is executed, even if bot configurations exist in the database.
+- Attempts to update bot configuration via the API return `403`.
+- The bot panel in the frontend shows a "bots disabled" message.
+- The restriction persists until the server is restarted without the variable set.
+
+You can also disable bots at runtime (without a restart) via `POST /api/fanout/bots/disable-until-restart`. This stops all running bot modules and keeps them disabled until the next process restart, but bot configuration remains editable via the API.
+
+<Tip>
+  If you want bots enabled but want to reduce exposure, combine `MESHCORE_BASIC_AUTH_USERNAME` + `MESHCORE_BASIC_AUTH_PASSWORD` with HTTPS to require credentials before anyone can reach the bot configuration API.
+</Tip>

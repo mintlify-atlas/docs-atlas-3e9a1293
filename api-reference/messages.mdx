@@ -1,0 +1,213 @@
+---
+title: "Messages, Packets, and Read State API endpoints"
+description: "Send direct messages and channel messages, search message history, manage raw packet storage, and track unread state via the RemoteTerm REST API."
+---
+
+RemoteTerm's message API covers the full lifecycle of mesh communication: sending DMs and channel messages, paginating and searching stored history, managing raw packet storage, and querying per-conversation unread counts. All endpoints are prefixed with `/api`.
+
+## Messages
+
+### List messages
+
+`GET /api/messages`
+
+Returns stored messages with optional filters. Supports full-text search and forward cursor pagination.
+
+<ParamField query="q" type="string">
+  Full-text search query. Filters messages whose text matches the keyword.
+</ParamField>
+
+<ParamField query="conversation_key" type="string">
+  Filter by conversation. For DMs: the contact's public key. For channels: the channel key.
+</ParamField>
+
+<ParamField query="type" type="string">
+  Filter by message type: `PRIV` (direct messages) or `CHAN` (channel messages).
+</ParamField>
+
+<ParamField query="after" type="integer">
+  Unix timestamp cursor for forward pagination. Returns messages after this timestamp.
+</ParamField>
+
+<ParamField query="after_id" type="integer">
+  Message ID cursor for forward pagination. Returns messages after this ID.
+</ParamField>
+
+### Get messages around a target
+
+`GET /api/messages/around/{id}`
+
+Returns a context window of messages surrounding the specified message ID. Used for jump-to-message navigation.
+
+<ParamField path="id" type="integer" required>
+  The message ID to center the context window around.
+</ParamField>
+
+### Send a direct message
+
+`POST /api/messages/direct`
+
+Sends a direct message to a contact. The backend pushes the contact's effective route to the radio, sends the message, and stores the outgoing record immediately. Background retries fire if the radio provides an expected ACK code and the message remains unacknowledged.
+
+<ParamField body="public_key" type="string" required>
+  Target contact's public key (64-char hex) or 12-char prefix.
+</ParamField>
+
+<ParamField body="text" type="string" required>
+  Message text to send.
+</ParamField>
+
+```bash
+curl -X POST http://localhost:8000/api/messages/direct \
+  -H "Content-Type: application/json" \
+  -d '{"public_key": "ae92577bae6c4f1d...", "text": "Hello from RemoteTerm"}'
+```
+
+### Send a channel message
+
+`POST /api/messages/channel`
+
+Sends a message to a channel. The radio's channel slot is configured from the LRU cache (or force-reconfigured on TCP transports).
+
+<ParamField body="key" type="string" required>
+  Channel key (32-char hex string).
+</ParamField>
+
+<ParamField body="text" type="string" required>
+  Message text to send.
+</ParamField>
+
+### Resend a channel message
+
+`POST /api/messages/channel/{message_id}/resend`
+
+Resends a previously sent channel message.
+
+<ParamField path="message_id" type="integer" required>
+  ID of the channel message to resend.
+</ParamField>
+
+<ParamField query="new_timestamp" type="boolean">
+  Default `false`: byte-perfect resend, only allowed within 30 seconds of the original send.
+  Set to `true` for a fresh timestamp with no time limit — creates a new message row.
+</ParamField>
+
+---
+
+## Raw Packets
+
+### Count undecrypted packets
+
+`GET /api/packets/undecrypted/count`
+
+Returns the number of stored raw packets that have not yet been decrypted.
+
+```bash
+curl http://localhost:8000/api/packets/undecrypted/count
+```
+
+### Fetch a single packet
+
+`GET /api/packets/{packet_id}`
+
+Fetches one stored raw packet by its database row ID for on-demand inspection.
+
+<ParamField path="packet_id" type="integer" required>
+  The packet's storage row ID (`id` field, not `observation_id`).
+</ParamField>
+
+### Decrypt historical packets
+
+`POST /api/packets/decrypt/historical`
+
+Triggers retroactive decryption of all stored packets using currently known channel and contact keys. Use this after adding a new channel key to recover messages received before the key was available.
+
+```bash
+curl -X POST http://localhost:8000/api/packets/decrypt/historical
+```
+
+<Note>
+  Historical decryption does not fan out to MQTT or bots — only real-time events trigger integrations.
+</Note>
+
+### Packet maintenance
+
+`POST /api/packets/maintenance`
+
+Deletes old raw packets and runs a SQLite VACUUM to reclaim disk space.
+
+```bash
+curl -X POST http://localhost:8000/api/packets/maintenance
+```
+
+---
+
+## Read State
+
+### Get unread counts
+
+`GET /api/read-state/unreads`
+
+Returns server-computed unread message counts and metadata for all conversations. Read state is tracked server-side for consistency across browser tabs and devices.
+
+**Response fields:**
+
+<ResponseField name="unread_counts" type="object">
+  Map of conversation state key → unread message count.
+</ResponseField>
+
+<ResponseField name="mention_flags" type="object">
+  Map of conversation state key → boolean indicating unread mention.
+</ResponseField>
+
+<ResponseField name="last_message_times" type="object">
+  Map of conversation state key → Unix timestamp of last message. Used for sidebar sorting.
+</ResponseField>
+
+<ResponseField name="last_read_ats" type="object">
+  Map of conversation state key → Unix timestamp of last mark-read action.
+</ResponseField>
+
+<Note>
+  Conversation state keys use the format `channel-{channel_key}` for channels and `contact-{full_public_key}` for contacts. These are different from `Message.conversation_key` (the database field).
+</Note>
+
+### Mark all conversations read
+
+`POST /api/read-state/mark-all-read`
+
+Marks all conversations as read by setting `last_read_at` to the current time for all contacts and channels.
+
+```bash
+curl -X POST http://localhost:8000/api/read-state/mark-all-read
+```
+
+---
+
+## Statistics
+
+### Get mesh statistics
+
+`GET /api/statistics`
+
+Returns aggregated mesh network statistics.
+
+<ResponseField name="entity_counts" type="object">
+  Counts of contacts, channels, messages, and raw packets in the database.
+</ResponseField>
+
+<ResponseField name="message_splits" type="object">
+  Message counts broken down by type (PRIV/CHAN) and direction (incoming/outgoing).
+</ResponseField>
+
+<ResponseField name="activity_windows" type="object">
+  Message activity counts over the last hour, day, and week.
+</ResponseField>
+
+<ResponseField name="busiest_channels" type="array">
+  Top channels by message volume.
+</ResponseField>
+
+<ResponseField name="noise_floor_history" type="array">
+  Recent noise floor snapshots from the radio.
+</ResponseField>

@@ -1,0 +1,120 @@
+---
+title: "Messaging: send and receive DMs and channel messages"
+description: "Send and receive direct messages and channel broadcasts in RemoteTerm, with ACK tracking, echo deduplication, full-text search, and server-side read state."
+---
+
+RemoteTerm gives you a persistent, browser-based messaging interface for your MeshCore radio. All messages are stored in SQLite on the server even when no client is connected, so you never lose traffic while your browser is closed. Direct messages (DMs) and channel messages work independently, each with their own delivery semantics, deduplication logic, and history controls.
+
+<Warning>
+  RemoteTerm has no per-user permissions model. Every user with access to the UI shares the same radio identity. Do not expose the interface to an untrusted network.
+</Warning>
+
+## Direct messages
+
+Direct messages are private, point-to-point exchanges with a specific contact identified by their public key.
+
+### Sending a DM
+
+RemoteTerm mirrors the firmware's `send_msg_with_retry` behavior when the radio provides an expected ACK code:
+
+<Steps>
+  <Step title="Stage the route">
+    Before sending, RemoteTerm pushes the contact's effective route to the radio using `add_contact`. Route precedence is: explicit override → learned direct route → flood.
+  </Step>
+  <Step title="Send and store">
+    The message is transmitted and immediately stored in the database as plaintext. No decryption is needed for outgoing DMs — the send endpoint writes them directly.
+  </Step>
+  <Step title="Track ACK">
+    If the initial `MSG_SENT` result includes an expected ACK code, the server arms background retries and waits for the ACK event.
+  </Step>
+  <Step title="Retry if needed">
+    Up to 2 retries are attempted in the background. Non-final retries use the effective route. The final retry is always sent as flood, even when a routing override is configured.
+  </Step>
+</Steps>
+
+**ACK state is terminal on first ACK.** When one retry ACK arrives, all sibling pending ACK codes for that message are cleared so a DM does not accumulate multiple delivery confirmations.
+
+### Receiving a DM
+
+Incoming DMs are decrypted server-side using the private key exported from the radio on startup. The key is held in memory only (never written to disk) and enables decryption even for contacts that are not currently loaded onto the radio.
+
+<Note>
+  All encrypted packets are retained in SQLite even before you have the relevant keys. When you export and add the radio private key, the server can decrypt previously stored incoming DMs retroactively. Trigger retroactive decryption via `POST /api/packets/decrypt/historical`.
+</Note>
+
+Incoming DMs are deduplicated by `(type, conversation_key, text, sender_timestamp, sender_key)`. Same-contact, same-text, same-second observations collapse onto one stored row with path data merged rather than creating a duplicate.
+
+## Channel messages
+
+Channel messages are broadcast to named channels. RemoteTerm stores more channels than the radio hardware supports — server-side management removes that limit.
+
+### Echo and repeat deduplication
+
+Channel messages propagate through repeaters and arrive multiple times via different paths. RemoteTerm deduplicates by `(type, conversation_key, text, sender_timestamp)`:
+
+- The first arrival creates the stored message row.
+- Subsequent arrivals from different paths are treated as echoes: the new path is appended to the message and the echo counter increments.
+- Multiple paths are shown in the UI when a message travels through different repeater routes.
+
+### Channel management
+
+<AccordionGroup>
+  <Accordion title="Adding channels">
+    Add channels by their 32-character hex key or by hashtag name. Hashtag channels use `SHA256("#name")[:16]` converted to hex. Use **Settings > Channels > Bulk hashtag import** to add many hashtag channels at once.
+  </Accordion>
+  <Accordion title="Per-channel flood scope">
+    Each channel can have a flood-scope override. When set, sends temporarily switch the radio flood scope for that channel, then restore the global app setting. Configure via `POST /api/channels/{key}/flood-scope-override`.
+  </Accordion>
+  <Accordion title="Per-channel path hash mode">
+    Channels can override the path hash mode (0 = 1-byte, 1 = 2-byte, 2 = 3-byte hops). Configure via `POST /api/channels/{key}/path-hash-mode-override`. The override applies only for the duration of the send.
+  </Accordion>
+</AccordionGroup>
+
+## Message history and search
+
+All messages are stored persistently in SQLite regardless of whether a browser client is connected. The message API supports several access patterns:
+
+<CardGroup cols={2}>
+  <Card title="Full-text search" icon="magnifying-glass">
+    Filter messages by keyword using the `q` parameter on `GET /api/messages`. Applies across all conversations or within a specific one.
+  </Card>
+  <Card title="Forward pagination" icon="arrow-right">
+    Use the `after` or `after_id` cursor parameters to page forward through history chronologically.
+  </Card>
+  <Card title="Jump to message" icon="crosshairs">
+    `GET /api/messages/around/{id}` returns a context window of messages surrounding any stored message ID, useful for navigating to a specific point in a conversation.
+  </Card>
+  <Card title="Real-time updates" icon="bolt">
+    New messages are pushed over the WebSocket (`message` event) as they arrive, so the UI updates instantly without polling.
+  </Card>
+</CardGroup>
+
+## Read state
+
+Read state is tracked server-side so your unread counts and mention flags are consistent across all devices and browser tabs.
+
+| Action | API endpoint |
+|--------|-------------|
+| Mark a contact conversation read | `POST /api/contacts/{key}/mark-read` |
+| Mark a channel read | `POST /api/channels/{key}/mark-read` |
+| Mark all conversations read | `POST /api/read-state/mark-all-read` |
+| Fetch unread counts and mention flags | `GET /api/read-state/unreads` |
+
+The `GET /api/read-state/unreads` response includes unread message counts, mention flags, last message times per conversation, and `last_read_at` boundaries for each contact and channel.
+
+## Contact management
+
+RemoteTerm stores contacts in its own database beyond radio hardware limits — approximately 350 contacts, compared to the radio's built-in capacity.
+
+**Contact types:**
+
+| Type code | Meaning |
+|-----------|---------|
+| `1` | Client (regular node) |
+| `2` | Repeater |
+| `3` | Room server |
+| `4` | Sensor |
+
+**Auto-DM ACKing:** Favorites and recently active contacts are loaded onto the radio so the firmware can auto-ACK incoming DMs even when the server is not actively processing them. The working set is maintained automatically: favorites reload first, non-favorites fill to about 80% of the configured radio capacity (`max_radio_contacts`), and a full offload/reload triggers around 95% occupancy.
+
+To set a routing override for a specific contact (forcing a particular path instead of letting the server choose), use `POST /api/contacts/{key}/routing-override`.

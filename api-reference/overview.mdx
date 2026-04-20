@@ -1,0 +1,133 @@
+---
+title: 'RemoteTerm REST API: base URL, auth, and endpoint groups'
+description: 'RemoteTerm exposes a FastAPI REST API under /api with optional HTTP Basic Auth, JSON bodies, open CORS, and automatic OpenAPI docs at /api/docs.'
+---
+
+RemoteTerm's backend is a [FastAPI](https://fastapi.tiangolo.com/) application that exposes every radio control, messaging, and configuration operation as a JSON REST API. All routes are mounted under the `/api` prefix (e.g., `/api/health`, `/api/contacts`). Interactive OpenAPI documentation is available at `/api/docs` while the server is running, and the raw schema is at `/api/openapi.json`.
+
+## Base URL
+
+```
+http://localhost:8000
+```
+
+Replace `localhost:8000` with your host and port if you run RemoteTerm on a different machine or port. All request and response bodies use `application/json`.
+
+## Authentication
+
+Authentication is **optional** and all-or-nothing. When enabled, every HTTP and WebSocket request requires valid HTTP Basic Auth credentials. There is no per-endpoint or per-user permission model.
+
+<Note>
+Authentication credentials are transmitted in plaintext in the `Authorization: Basic` header. You must use HTTPS to protect them. Enabling Basic Auth without TLS provides no real security.
+</Note>
+
+### Enabling Basic Auth
+
+Set both environment variables before starting the server:
+
+```bash
+export MESHCORE_BASIC_AUTH_USERNAME=admin
+export MESHCORE_BASIC_AUTH_PASSWORD=your-secret-password
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+Both variables must be set together or neither should be set. Setting only one causes the server to refuse to start.
+
+### Sending credentials
+
+<ParamField header="Authorization" type="string">
+  HTTP Basic Auth header. Value is `Basic <base64(username:password)>`. Browsers prompt automatically when accessing `/api/docs` or any protected route.
+</ParamField>
+
+```bash
+curl -u admin:your-secret-password http://localhost:8000/api/health
+```
+
+Credentials can also be embedded in the URL for tools that support it:
+
+```bash
+curl http://admin:your-secret-password@localhost:8000/api/health
+```
+
+## CORS
+
+CORS is intentionally open (`allow_origins=["*"]`). RemoteTerm is designed for trusted-network deployments where any device on the local network should be able to reach the server without configuration. Do not expose the server to the public internet without additional network-level controls.
+
+## Error format
+
+Validation errors follow the standard FastAPI format:
+
+```json
+{
+  "detail": [
+    {
+      "loc": ["body", "field_name"],
+      "msg": "field required",
+      "type": "value_error.missing"
+    }
+  ]
+}
+```
+
+Simple errors return a string detail:
+
+```json
+{ "detail": "Contact not found" }
+```
+
+## Health and debug
+
+<ResponseField name="GET /api/health" type="object">
+  Returns the current radio connection status, per-integration fanout statuses, and the `bots_disabled` flag. This is the primary liveness check.
+</ResponseField>
+
+<ResponseField name="GET /api/debug" type="object">
+  Returns a full support snapshot: recent application logs, a live radio probe, contact/channel slot drift audit, and running version/git metadata. Use this when troubleshooting connectivity or sync issues.
+</ResponseField>
+
+```bash
+curl http://localhost:8000/api/health
+```
+
+```json
+{
+  "connected": true,
+  "connection_info": "Serial /dev/ttyUSB0",
+  "fanout_statuses": {},
+  "bots_disabled": false
+}
+```
+
+## Endpoint groups
+
+<CardGroup cols={2}>
+  <Card title="Radio" icon="radio" href="/api-reference/radio">
+    Get and update radio configuration, send advertisements, run discovery sweeps and trace loops, reboot, disconnect, and reconnect.
+  </Card>
+  <Card title="Contacts" icon="address-book" href="/api-reference/contacts">
+    List, create, and delete contacts. Manage routing overrides, trace routes, discover paths, and issue repeater and room server commands.
+  </Card>
+  <Card title="Channels" icon="hashtag" href="/api-reference/channels">
+    List, create, and delete channels. Set per-channel flood-scope and path-hash-mode overrides. Bulk-create hashtag channels.
+  </Card>
+  <Card title="Messages" icon="message" href="/api-reference/messages">
+    List and search messages with cursor pagination. Send DMs and channel messages. Resend channel messages. Manage raw packet storage.
+  </Card>
+  <Card title="Fanout" icon="share-nodes" href="/api-reference/fanout">
+    Create, update, and delete MQTT, bot, webhook, Apprise, SQS, and map-upload integrations with per-config event scoping.
+  </Card>
+  <Card title="Settings and push" icon="gear" href="/api-reference/settings">
+    Manage app settings, favorites, blocked lists, telemetry scheduling, and Web Push subscriptions.
+  </Card>
+</CardGroup>
+
+### Additional endpoint groups
+
+The following groups are part of the API but do not have dedicated reference pages. They are listed here for completeness.
+
+| Group | Endpoints | Description |
+|---|---|---|
+| Packets | `GET /api/packets/undecrypted/count`, `GET /api/packets/{id}`, `POST /api/packets/decrypt/historical`, `POST /api/packets/maintenance` | Raw packet inspection, historical decryption, and storage maintenance |
+| Read state | `GET /api/read-state/unreads`, `POST /api/read-state/mark-all-read` | Server-computed unread counts, mention flags, and bulk mark-read |
+| Statistics | `GET /api/statistics` | Aggregated mesh stats: entity counts, message splits, activity windows, busiest channels, noise-floor history |
+| WebSocket | `WS /api/ws` | Real-time event stream — see the [WebSocket events reference](/api-reference/websocket-events) |

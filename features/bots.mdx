@@ -1,0 +1,134 @@
+---
+title: "Python bots for automated mesh message handling"
+description: "Write Python bots that execute server-side when messages arrive, access full message context, and automatically reply to DMs and channel conversations."
+---
+
+RemoteTerm includes a bot system that lets you run Python code automatically when messages arrive. Bots are server-side functions that receive message context — sender, text, channel, path — and can send replies back to the conversation. They are suitable for auto-responders, keyword triggers, logging pipelines, and other automation tasks that need to react to mesh traffic.
+
+<Warning>
+  **The bot system executes arbitrary Python code with full access to `__builtins__`.** Anyone who can access the RemoteTerm UI can write and run bot code on your server. This is an intentional design decision for trusted, single-operator environments — not a bug. Before enabling bots, understand that any user with UI access has effective code execution on your host. Set `MESHCORE_DISABLE_BOTS=true` to disable the system entirely if you do not need it. If you enable Basic Auth, pair it with HTTPS.
+</Warning>
+
+## What bots are
+
+A bot is a Python function named `bot` that RemoteTerm calls in a thread pool when a message matches the bot's configured scope. The function receives message context and can return a string or list of strings; RemoteTerm sends those as replies.
+
+**Execution environment:**
+- Runs in a dedicated thread pool (up to 100 concurrent bot executions)
+- A semaphore limits concurrency to prevent resource exhaustion
+- Each execution is bounded to a 10-second timeout
+- Outgoing bot replies are rate-limited to at least 2 seconds between sends, giving repeaters time to return to listening mode
+
+## Bot configuration
+
+<Steps>
+  <Step title="Open integrations settings">
+    Go to **Settings > Integrations** in the RemoteTerm UI.
+  </Step>
+  <Step title="Add a bot">
+    Click **Add**, then choose **Bot** from the integration type list.
+  </Step>
+  <Step title="Write the bot function">
+    Enter your Python code in the editor. The code must define a function named `bot`.
+  </Step>
+  <Step title="Configure scope">
+    Choose which messages trigger the bot: all messages, specific channels, specific contacts, or none (draft/disabled).
+  </Step>
+  <Step title="Enable and save">
+    Enable the bot and save. The module loads immediately without a server restart.
+  </Step>
+</Steps>
+
+To disable all bots immediately without a restart, use **Settings > Integrations > Disable bots until restart**, or call `POST /api/fanout/bots/disable-until-restart`. This stops all bot fanout modules and blocks new executions until the process restarts.
+
+## Bot code structure
+
+Your bot code must define a function named `bot`. RemoteTerm inspects the function signature and calls it with the appropriate arguments. The recommended signature uses keyword arguments for forward compatibility:
+
+```python
+def bot(
+    sender_name,
+    sender_key,
+    message_text,
+    is_dm,
+    channel_key,
+    channel_name,
+    sender_timestamp,
+    path,
+    is_outgoing=False,
+    path_bytes_per_hop=None,
+    **kwargs,
+):
+    # Return None to send no reply
+    # Return a string to send one reply
+    # Return a list of strings to send multiple replies in order
+    if is_dm and not is_outgoing and message_text.lower() == "ping":
+        return "pong"
+    return None
+```
+
+**Available parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `sender_name` | `str \| None` | Display name of the sender |
+| `sender_key` | `str \| None` | 64-char hex public key (DMs only; `None` for channel messages) |
+| `message_text` | `str` | Message content. For channel messages, the `"SenderName: "` prefix is stripped so the bot sees only the body text. |
+| `is_dm` | `bool` | `True` for direct messages, `False` for channel messages |
+| `channel_key` | `str \| None` | 32-char hex channel key (channel messages only) |
+| `channel_name` | `str \| None` | Channel name, e.g. `"#general"` |
+| `sender_timestamp` | `int \| None` | Sender's Unix timestamp (1-second resolution) |
+| `path` | `str \| None` | Hex-encoded routing path |
+| `is_outgoing` | `bool` | `True` if this is your own outgoing message |
+| `path_bytes_per_hop` | `int \| None` | Bytes per routing hop (1, 2, or 3) |
+
+**Return values:**
+- `None` — no reply sent
+- A non-empty `str` — sent as one reply to the conversation
+- A `list[str]` — each non-empty string sent in order, with rate-limiting between sends
+
+RemoteTerm also supports legacy positional signatures with 8 or 9 parameters for backward compatibility.
+
+## Reply routing
+
+When a bot returns a response, RemoteTerm routes it automatically:
+
+- **DM conversations**: reply is sent as a direct message to `sender_key`
+- **Channel conversations**: reply is sent to the same `channel_key`
+
+Bot replies go through the same send pipeline as user-initiated messages, including ACK tracking for DMs and channel slot management for channel replies.
+
+## Scope configuration
+
+Each bot can be scoped to control which messages it receives:
+
+<AccordionGroup>
+  <Accordion title="All messages">
+    The bot receives every decoded message: all DMs and all channel messages.
+  </Accordion>
+  <Accordion title="Specific channels">
+    Supply a list of channel keys. The bot only receives messages from those channels.
+  </Accordion>
+  <Accordion title="Specific contacts">
+    Supply a list of contact public keys. The bot only receives DMs from those contacts.
+  </Accordion>
+  <Accordion title="None (draft)">
+    The bot is stored but receives no messages. Useful for drafting or disabling without deleting.
+  </Accordion>
+</AccordionGroup>
+
+Scope filtering applies to `on_message` only. Outgoing messages can be filtered using `is_outgoing` inside the bot function itself.
+
+## Disabling the bot system
+
+To completely disable bots at startup — blocking both execution and configuration changes — set the environment variable before launching:
+
+```bash
+MESHCORE_DISABLE_BOTS=true uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+When `MESHCORE_DISABLE_BOTS=true` is set:
+- All bot execution is skipped
+- `POST /api/fanout` and `PATCH /api/fanout/{id}` return `403` for bot-type configs
+- The UI shows a disabled indicator in the integrations panel
+- The `bots_disabled` flag is exposed on `GET /api/health`

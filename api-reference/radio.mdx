@@ -1,0 +1,315 @@
+---
+title: 'Radio API endpoints: config, advertise, and control'
+description: 'All /api/radio endpoints for reading and updating radio configuration, sending advertisements, running discovery and trace, and managing radio connection state.'
+---
+
+The radio endpoints give you direct control over the connected MeshCore radio: read its identity and RF parameters, push configuration changes, send on-demand advertisements, run mesh discovery sweeps and multi-hop trace loops, and manage the connection lifecycle. All endpoints require an active radio connection unless noted — they return `503` if the radio is disconnected.
+
+<Note>
+Radio operations acquire an exclusive lock on the radio connection for the duration of the request. Long-running operations (discovery, trace) temporarily pause background polling to avoid interference.
+</Note>
+
+---
+
+## GET /api/radio/config
+
+Returns the current radio configuration, including RF parameters, identity, and routing mode settings.
+
+<ResponseField name="public_key" type="string" required>
+  Radio's public key as a 64-character hex string.
+</ResponseField>
+
+<ResponseField name="name" type="string" required>
+  Radio display name.
+</ResponseField>
+
+<ResponseField name="lat" type="number" required>
+  Advertised latitude. `0.0` is the MeshCore sentinel for "no GPS".
+</ResponseField>
+
+<ResponseField name="lon" type="number" required>
+  Advertised longitude. `0.0` means no GPS.
+</ResponseField>
+
+<ResponseField name="tx_power" type="number" required>
+  Current transmit power in dBm.
+</ResponseField>
+
+<ResponseField name="max_tx_power" type="number" required>
+  Maximum supported transmit power in dBm.
+</ResponseField>
+
+<ResponseField name="radio" type="object" required>
+  RF parameters.
+  <Expandable title="properties">
+    <ResponseField name="freq" type="number">Frequency in MHz.</ResponseField>
+    <ResponseField name="bw" type="number">Bandwidth in kHz.</ResponseField>
+    <ResponseField name="sf" type="number">Spreading factor (7–12).</ResponseField>
+    <ResponseField name="cr" type="number">Coding rate (1–4).</ResponseField>
+  </Expandable>
+</ResponseField>
+
+<ResponseField name="path_hash_mode" type="number" required>
+  Current hop identifier width mode: `0`=1-byte, `1`=2-byte, `2`=3-byte.
+</ResponseField>
+
+<ResponseField name="path_hash_mode_supported" type="boolean" required>
+  Whether the connected firmware supports updating `path_hash_mode`. If `false`, `PATCH /api/radio/config` will reject `path_hash_mode` changes.
+</ResponseField>
+
+<ResponseField name="advert_location_source" type="string" required>
+  Whether advertisements include the node's GPS location: `"current"` or `"off"`.
+</ResponseField>
+
+<ResponseField name="multi_acks_enabled" type="boolean" required>
+  Whether the radio sends an extra direct ACK transmission after receiving a message.
+</ResponseField>
+
+```bash
+curl http://localhost:8000/api/radio/config
+```
+
+```json
+{
+  "public_key": "a1b2c3d4...",
+  "name": "MyNode",
+  "lat": 37.7749,
+  "lon": -122.4194,
+  "tx_power": 20,
+  "max_tx_power": 22,
+  "radio": { "freq": 915.0, "bw": 250.0, "sf": 10, "cr": 5 },
+  "path_hash_mode": 0,
+  "path_hash_mode_supported": true,
+  "advert_location_source": "current",
+  "multi_acks_enabled": false
+}
+```
+
+---
+
+## PATCH /api/radio/config
+
+Updates radio configuration. Only fields included in the request body are changed. Returns the full updated config on success.
+
+<ParamField body="name" type="string">
+  New display name for the radio.
+</ParamField>
+
+<ParamField body="lat" type="number">
+  New advertised latitude.
+</ParamField>
+
+<ParamField body="lon" type="number">
+  New advertised longitude.
+</ParamField>
+
+<ParamField body="tx_power" type="number">
+  Transmit power in dBm.
+</ParamField>
+
+<ParamField body="radio" type="object">
+  RF parameters to update.
+  <Expandable title="properties">
+    <ParamField body="freq" type="number">Frequency in MHz.</ParamField>
+    <ParamField body="bw" type="number">Bandwidth in kHz.</ParamField>
+    <ParamField body="sf" type="number">Spreading factor (7–12).</ParamField>
+    <ParamField body="cr" type="number">Coding rate (1–4).</ParamField>
+  </Expandable>
+</ParamField>
+
+<ParamField body="path_hash_mode" type="number">
+  Hop identifier width mode: `0`, `1`, or `2`. Only accepted when `path_hash_mode_supported` is `true`; returns `400` otherwise.
+</ParamField>
+
+<ParamField body="advert_location_source" type="string">
+  `"current"` to include GPS in advertisements, `"off"` to suppress it.
+</ParamField>
+
+<ParamField body="multi_acks_enabled" type="boolean">
+  Enable or disable the extra direct ACK transmission.
+</ParamField>
+
+```bash
+curl -X PATCH http://localhost:8000/api/radio/config \
+  -H "Content-Type: application/json" \
+  -d '{"name": "BaseStation", "multi_acks_enabled": true}'
+```
+
+---
+
+## PUT /api/radio/private-key
+
+Imports a private key into the radio and refreshes the in-memory keystore used for DM decryption. This is a write-only operation — the private key is never returned by any API endpoint.
+
+<ParamField body="private_key" type="string" required>
+  Private key as a hex string.
+</ParamField>
+
+```bash
+curl -X PUT http://localhost:8000/api/radio/private-key \
+  -H "Content-Type: application/json" \
+  -d '{"private_key": "deadbeef..."}'
+```
+
+---
+
+## POST /api/radio/advertise
+
+Sends an advertisement from the local radio to announce its presence on the mesh. Manual advertisement requests always send immediately, bypassing the periodic interval timer.
+
+<ParamField body="mode" type="string" default="flood">
+  Advertisement mode: `"flood"` propagates the advert through repeaters; `"zero_hop"` broadcasts only to directly reachable nodes.
+</ParamField>
+
+```bash
+curl -X POST http://localhost:8000/api/radio/advertise \
+  -H "Content-Type: application/json" \
+  -d '{"mode": "flood"}'
+```
+
+```json
+{ "status": "ok" }
+```
+
+---
+
+## POST /api/radio/discover
+
+Runs a short mesh discovery sweep (8-second listen window) for nearby repeaters and sensors. New nodes found during the sweep are automatically added to the contacts database. Returns deduplicated results sorted by node type then signal strength.
+
+<ParamField body="target" type="string" default="all">
+  Which node classes to discover: `"repeaters"`, `"sensors"`, or `"all"`.
+</ParamField>
+
+<ResponseField name="target" type="string" required>
+  The target filter used for this sweep.
+</ResponseField>
+
+<ResponseField name="duration_seconds" type="number" required>
+  How long the sweep listened for responses.
+</ResponseField>
+
+<ResponseField name="results" type="array" required>
+  Deduplicated discovery results.
+  <Expandable title="result fields">
+    <ResponseField name="public_key" type="string">Discovered node public key.</ResponseField>
+    <ResponseField name="name" type="string | null">Known name from contacts DB, if any.</ResponseField>
+    <ResponseField name="node_type" type="string">`"repeater"` or `"sensor"`.</ResponseField>
+    <ResponseField name="heard_count" type="number">How many responses were received from this node.</ResponseField>
+    <ResponseField name="local_snr" type="number | null">Best SNR at which the local radio heard the response (dB).</ResponseField>
+    <ResponseField name="local_rssi" type="number | null">Best RSSI at which the local radio heard the response (dBm).</ResponseField>
+    <ResponseField name="remote_snr" type="number | null">SNR reported by the remote node while hearing our request (dB).</ResponseField>
+  </Expandable>
+</ResponseField>
+
+```bash
+curl -X POST http://localhost:8000/api/radio/discover \
+  -H "Content-Type: application/json" \
+  -d '{"target": "repeaters"}'
+```
+
+---
+
+## POST /api/radio/trace
+
+Sends a multi-hop trace loop through a specified sequence of repeaters and back to the local radio. Each hop can be specified by full public key (resolved from contacts) or raw hop hash hex. Returns per-node SNR data from the echo.
+
+<Warning>
+The trace loop occupies the radio for up to 45 seconds. Background polling is paused for the duration.
+</Warning>
+
+<ParamField body="hop_hash_bytes" type="number" default="4">
+  Hash width in bytes for every hop: `1`, `2`, or `4`. Using `4` bytes gives the lowest hash collision risk.
+</ParamField>
+
+<ParamField body="hops" type="array" required>
+  Ordered list of repeater hops. Each entry must include exactly one of `public_key` (full 64-char hex, must be a repeater in the contacts DB) or `hop_hex` (raw hex of the correct width).
+</ParamField>
+
+<ResponseField name="path_len" type="number" required>
+  Number of hashed nodes returned in the trace response.
+</ResponseField>
+
+<ResponseField name="timeout_seconds" type="number" required>
+  Timeout window used while waiting for the trace response.
+</ResponseField>
+
+<ResponseField name="nodes" type="array" required>
+  Ordered trace nodes. Requested hops appear first, followed by the terminal local radio node.
+  <Expandable title="node fields">
+    <ResponseField name="role" type="string">`"repeater"`, `"custom"`, or `"local"`.</ResponseField>
+    <ResponseField name="public_key" type="string | null">Full public key when known.</ResponseField>
+    <ResponseField name="name" type="string | null">Display name when known.</ResponseField>
+    <ResponseField name="observed_hash" type="string | null">Observed 4-byte trace hash as hex.</ResponseField>
+    <ResponseField name="snr" type="number | null">Reported SNR at this node (dB).</ResponseField>
+  </Expandable>
+</ResponseField>
+
+```bash
+curl -X POST http://localhost:8000/api/radio/trace \
+  -H "Content-Type: application/json" \
+  -d '{
+    "hop_hash_bytes": 4,
+    "hops": [
+      {"public_key": "aabbccdd...full-64-char-key..."}
+    ]
+  }'
+```
+
+---
+
+## POST /api/radio/reboot
+
+Reboots the radio if connected, or attempts to reconnect if disconnected. When connected, the reboot command is sent and the radio's auto-reconnect monitor handles the re-establishment. When disconnected, this behaves identically to `POST /api/radio/reconnect`.
+
+```bash
+curl -X POST http://localhost:8000/api/radio/reboot
+```
+
+```json
+{
+  "status": "ok",
+  "message": "Reboot command sent. Radio will reconnect automatically."
+}
+```
+
+---
+
+## POST /api/radio/disconnect
+
+Disconnects from the radio and pauses automatic reconnect attempts. The radio continues operating independently; this only stops the server's connection.
+
+```bash
+curl -X POST http://localhost:8000/api/radio/disconnect
+```
+
+```json
+{
+  "status": "ok",
+  "message": "Disconnected. Automatic reconnect is paused.",
+  "connected": false,
+  "paused": true
+}
+```
+
+---
+
+## POST /api/radio/reconnect
+
+Manually attempts to reconnect to the radio. If already connected and setup is complete, returns immediately. If connected but setup is incomplete, retries post-connect setup. If disconnected, attempts a full reconnection (with auto-detection if no specific port is configured).
+
+```bash
+curl -X POST http://localhost:8000/api/radio/reconnect
+```
+
+```json
+{
+  "status": "ok",
+  "message": "Reconnected successfully",
+  "connected": true
+}
+```
+
+<Tip>
+Use `POST /api/radio/reboot` when you want to cycle the radio firmware itself. Use `POST /api/radio/reconnect` when you want to re-establish the server's serial/TCP/BLE connection without rebooting the radio.
+</Tip>

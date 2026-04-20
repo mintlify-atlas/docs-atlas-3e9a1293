@@ -1,0 +1,90 @@
+---
+title: "Web Push notifications for incoming mesh messages"
+description: "Set up browser push notifications in RemoteTerm to receive alerts for new direct messages and channel messages even when the browser tab is closed."
+---
+
+RemoteTerm can send browser push notifications for incoming mesh messages, so you receive alerts even when the tab is closed or the browser is in the background. Push notifications are delivered through the browser's native push service — Google FCM for Chrome, Mozilla autopush for Firefox — using the Web Push protocol with VAPID signing.
+
+<Warning>
+  Web Push requires HTTPS. Plain HTTP does not support push notifications, even on a local network. The only exception is `localhost` itself (the exact origin `http://localhost`). Self-signed certificates work fine — see the [HTTPS and security guide](/configuration/https-and-security) for setup instructions.
+</Warning>
+
+## How it works
+
+RemoteTerm's push subsystem (`app/push/`) operates independently from the fanout integration bus. It is not a fanout module and does not share fanout configuration.
+
+- **VAPID key pair**: A P-256 key pair is auto-generated on first startup and stored in `app_settings`. The public key is served at `GET /api/push/vapid-public-key` for browser subscription setup.
+- **Per-browser subscriptions**: Each browser that opts in stores its subscription endpoint and keys in the `push_subscriptions` table (unique per endpoint). Multiple browsers can be subscribed simultaneously.
+- **Global conversation list**: The set of conversations that trigger notifications is stored once per server instance in `app_settings.push_conversations`. All subscribed browsers receive notifications for the same configured rooms and DMs.
+- **Dispatch**: When an incoming message event arrives, the push manager checks the global conversation list. If the conversation matches, it sends to all registered subscriptions concurrently via `pywebpush`.
+- **Stale cleanup**: If a push service returns HTTP 404 or 410 (expired or invalid endpoint), the subscription is automatically deleted.
+
+## Requirements
+
+- **HTTPS** on the RemoteTerm server (self-signed certificates are acceptable)
+- **Outbound internet** from the server to reach browser push services (Google FCM, Mozilla autopush)
+
+<Note>
+  Web Push requires the server to make outbound HTTPS requests to external push service endpoints. If your server is on an air-gapped network or behind a restrictive firewall, push notifications will not work.
+</Note>
+
+## Setting up push notifications
+
+<Steps>
+  <Step title="Enable HTTPS">
+    Web Push requires a secure context. Follow the [HTTPS and security guide](/configuration/https-and-security) to generate a certificate and restart the server with TLS.
+  </Step>
+
+  <Step title="Subscribe your browser">
+    Open RemoteTerm in your browser over HTTPS, then go to **Settings > Local** and subscribe the current browser to push notifications. The browser will prompt you to allow notifications.
+  </Step>
+
+  <Step title="Enable push for specific conversations">
+    Open a direct message or channel conversation. Toggle the bell icon in the chat header to enable push notifications for that conversation.
+
+    Conversations with push enabled appear in the global list that all subscribed browsers share.
+  </Step>
+
+  <Step title="Manage subscriptions">
+    Go to **Settings > Local** to view all registered browser subscriptions. You can:
+
+    - Add a label to identify each device
+    - Adjust per-subscription filter preferences
+    - Send a test notification to verify delivery
+    - Delete subscriptions you no longer need
+  </Step>
+</Steps>
+
+## Subscription API
+
+Subscriptions can also be managed directly via the REST API.
+
+### Subscription endpoints
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/push/subscriptions` | List all registered push subscriptions |
+| `PATCH` | `/api/push/subscriptions/{id}` | Update subscription label or filter preferences |
+| `DELETE` | `/api/push/subscriptions/{id}` | Remove a subscription |
+| `POST` | `/api/push/subscriptions/{id}/test` | Send a test notification to a specific subscription |
+
+### Conversation endpoints
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/api/push/conversations` | List the global set of push-enabled conversation state keys |
+| `POST` | `/api/push/conversations/toggle` | Add or remove a conversation from the global push list |
+
+Conversation state keys use the format `contact-{public_key}` for direct message contacts and `channel-{channel_key}` for channels.
+
+## Notification behavior
+
+Each notification is tagged per conversation (`meshcore-contact-{key}` or `meshcore-channel-{key}`), so multiple messages in the same conversation replace each other in the notification tray rather than stacking. Clicking a notification navigates directly to the relevant conversation in the app.
+
+Outgoing messages never trigger push notifications — only incoming messages from the radio are dispatched.
+
+The service worker (`sw.js`) handles push display and notification click navigation. It is registered automatically by the frontend on first load over HTTPS.
+
+<Tip>
+  If you have multiple browsers or devices subscribed, you can label each subscription in **Settings > Local** to tell them apart. All subscribed devices receive notifications for the same set of conversations.
+</Tip>

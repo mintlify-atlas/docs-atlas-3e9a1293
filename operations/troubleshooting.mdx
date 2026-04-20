@@ -1,0 +1,178 @@
+---
+title: "Troubleshooting RemoteTerm connection and sync issues"
+description: "Diagnose and resolve common issues with serial connections, message sync, contact loading, radio clock problems, and how to capture debug logs for bug reports."
+---
+
+Most issues with RemoteTerm fall into a small number of categories: transport connection problems, missing or duplicated messages, contact table saturation, and radio clock edge cases. This page walks through each area and explains the available remediation tools.
+
+## Debug logging
+
+The first step for any unexplained behavior is to enable debug logging. Debug mode provides detailed output for radio communication, packet processing, and internal operations.
+
+```bash
+MESHCORE_LOG_LEVEL=DEBUG uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+### Debug support snapshot
+
+For bug reports or deeper inspection, navigate to `/api/debug` in your browser, or go to **Settings > About** and select **Open debug support snapshot**.
+
+The snapshot contains:
+
+- Recent backend logs
+- A live radio probe result
+- A contact and channel drift audit
+- Version and build information
+
+<Warning>
+  The non-log sections of the snapshot contain no private keys, channel names, or key material. The log section, however, **may contain channel names or channel keys**. Your private key is never included.
+
+  If you do not want to share log data, copy the snapshot up to the `STOP COPYING HERE` marker and omit everything below it.
+</Warning>
+
+## Serial connection issues
+
+<AccordionGroup>
+  <Accordion title='"Received empty packet: index out of range" on startup'>
+    This is a known intermittent Windows startup issue. It typically causes a failed contact sync on the first run. The cause is not fully understood. Restarting the server resolves it in most cases.
+  </Accordion>
+
+  <Accordion title="Serial port not found">
+    Use the port-finding commands for your operating system:
+
+    ```bash
+    # Linux
+    ls /dev/ttyUSB* /dev/ttyACM*
+
+    # macOS
+    ls /dev/cu.usbserial-* /dev/cu.usbmodem*
+    ```
+
+    ```powershell
+    # Windows (PowerShell)
+    Get-CimInstance Win32_SerialPort | Select-Object DeviceID, Caption
+    ```
+
+    Then set `MESHCORE_SERIAL_PORT` to the correct port path before launching.
+  </Accordion>
+
+  <Accordion title="Docker serial passthrough failures">
+    Rootless Docker is known to fail on serial device mappings even when the compose file is correct. Use rootful Docker instead:
+
+    ```bash
+    sudo docker compose up
+    ```
+
+    If you do not need serial passthrough and can use TCP or BLE, the rootless Docker path is more straightforward.
+  </Accordion>
+</AccordionGroup>
+
+## Message sync issues
+
+By default, RemoteTerm relies on radio event subscriptions for incoming messages, plus a low-frequency hourly audit that checks for any messages that arrived without triggering an event.
+
+If messages on the radio are not appearing in the app, or if you are seeing gaps, enable the message poll fallback:
+
+```bash
+MESHCORE_ENABLE_MESSAGE_POLL_FALLBACK=true uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+This switches the audit task from hourly to every 10 seconds. The same audit also checks for channel-slot drift and resets the slot cache if a mismatch is found.
+
+### Channel sends using the wrong slot
+
+If a channel message appears to be sent on the wrong channel, the slot cache may be out of sync with the radio's actual channel assignments. This can happen when another client modifies channel slots while RemoteTerm is running.
+
+When the app detects a slot mismatch it logs the event, shows a toast in the UI, and resets the send-slot cache automatically. To prevent future mismatches, force a reconfigure before every channel send:
+
+```bash
+MESHCORE_FORCE_CHANNEL_SLOT_RECONFIGURE=true uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+<Note>
+  `MESHCORE_FORCE_CHANNEL_SLOT_RECONFIGURE=true` adds approximately 500 ms to each channel send but guarantees the correct slot is always set. It is most useful when another MeshCore client is actively modifying channel assignments on the same radio.
+</Note>
+
+## Contact loading issues
+
+RemoteTerm loads contacts onto the radio so the radio can automatically acknowledge incoming direct messages. If the radio contact table is full, some contacts may not load.
+
+Symptoms include a warning toast that auto-DM acking may not work for all contacts, or a `TABLE_FULL` error in the logs.
+
+**Options to resolve:**
+
+- **Clear the radio's contact table** using another MeshCore client (the official companion app), then restart RemoteTerm.
+- **Lower the contact fill target** via **Settings > Radio** to reduce how many contacts the app maintains on the radio.
+- **Enable autoevict mode** with `MESHCORE_LOAD_WITH_AUTOEVICT=true` to let the radio evict old contacts automatically when the table is full.
+
+For a full description of autoevict trade-offs, see the [advanced setup guide](/operations/advanced-setup).
+
+<Note>
+  On BLE connections with many contacts, the initial contact enumeration may time out. The app continues loading contacts on a best-effort basis. Sending and receiving messages is never affected — only automatic DM acknowledgement requires contacts to be loaded on the radio.
+</Note>
+
+## Radio clock issues
+
+If the radio's RTC is stuck in the future and rescue-mode time setting or GPS sync is not available, there is a last-resort remediation variable:
+
+```bash
+__CLOWNTOWN_DO_CLOCK_WRAPAROUND=true uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+<Warning>
+  This is highly experimental. It forces the radio clock to `0xFFFFFFFF` and waits for the uint32 counter to wrap around before retrying normal time sync. The behavior is board-specific and **may not be safe or effective on all MeshCore targets.** Use this only as a last resort when no other time-recovery path is available.
+</Warning>
+
+## Reconnection
+
+The connection monitor checks health every 5 seconds. If the connection drops, RemoteTerm attempts an automatic reconnect.
+
+If post-connect setup hangs past its timeout, the backend logs the failure and displays a toast instructing you to reboot the radio and restart the server.
+
+Manual radio controls are available in **Settings > Radio**:
+
+| Action | UI button | API endpoint |
+|---|---|---|
+| Reconnect | **Reconnect** | `POST /api/radio/reconnect` |
+| Reboot radio | **Reboot** | `POST /api/radio/reboot` |
+| Disconnect | **Disconnect** | `POST /api/radio/disconnect` |
+
+## Home Assistant troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Devices not appearing in Home Assistant">
+    Verify that the MQTT integration is configured in Home Assistant and that both RemoteTerm and Home Assistant are pointed at the same broker. Check the MQTT integration settings in Home Assistant and confirm the broker host and port match your RemoteTerm fanout configuration.
+  </Accordion>
+
+  <Accordion title="Stale or duplicate devices">
+    Stale or duplicate devices are usually caused by retained MQTT messages from a previous configuration. Clear retained messages with `mosquitto_pub`:
+
+    ```bash
+    mosquitto_pub -h <broker_host> -t "homeassistant/#" -r -n
+    ```
+
+    Then restart both RemoteTerm and Home Assistant to republish discovery payloads cleanly.
+  </Accordion>
+
+  <Accordion title="Repeater sensors showing Unknown or Unavailable">
+    Repeater telemetry is only published when RemoteTerm collects it. Either wait for the scheduled auto-collect interval or trigger a manual telemetry fetch from the repeater pane in the UI. The sensor will become available once RemoteTerm publishes the first reading.
+  </Accordion>
+</AccordionGroup>
+
+## Known non-issues
+
+These behaviors may look like bugs but are intentional or unavoidable given protocol constraints.
+
+<AccordionGroup>
+  <Accordion title="advert parsing crash on malformed packets">
+    The `meshcore_py` library's advert parser does not guard against truncated or malformed RF log frames. If such a packet arrives, the parser may throw an `IndexError: index out of range` from `meshcore/reader.py` when processing a payload of type `0x04` (advert).
+
+    This is a hardening gap in `meshcore_py`, not a RemoteTerm bug. The failure is isolated to the one malformed packet — subsequent packets continue processing normally.
+  </Accordion>
+
+  <Accordion title="Channel message dedup treats identical sends as the same message">
+    Channel messages are deduplicated on `(type, conversation_key, text, sender_timestamp)`. Because the stored `text` for channel messages includes the sender's display name (for example `Alice: hello`), two different users only collide when they share the same display name, send the same text, and send within the same second.
+
+    In that case, RemoteTerm cannot reliably distinguish "two independent same-name sends" from "one message observed again as an echo." Without a reliable sender identity at ingest, treating those packets as the same message is an accepted limitation of the observable data model.
+  </Accordion>
+</AccordionGroup>

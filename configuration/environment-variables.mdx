@@ -1,0 +1,160 @@
+---
+title: "Environment variables reference for RemoteTerm"
+description: "All environment variables for RemoteTerm: radio transport selection, logging, database path, HTTP Basic Auth, bot controls, and remediation options."
+---
+
+RemoteTerm is configured primarily through environment variables set at launch time. Only one radio transport may be active at a time — the server will refuse to start if you set variables for more than one. Runtime settings such as contact limits and advertisement intervals are stored in the database and managed through the Settings UI or `PATCH /api/settings`.
+
+## Transport variables
+
+Only one transport group may be set at a time. Setting variables from more than one group causes the server to exit with a configuration error.
+
+<Warning>
+  If you set `MESHCORE_SERIAL_PORT`, `MESHCORE_TCP_HOST`, or `MESHCORE_BLE_ADDRESS` simultaneously, RemoteTerm will refuse to start. Pick exactly one transport.
+</Warning>
+
+### Serial
+
+Serial is the recommended transport for most setups. If `MESHCORE_SERIAL_PORT` is not set, RemoteTerm attempts to auto-detect a connected radio.
+
+| Variable | Default | Description |
+|---|---|---|
+| `MESHCORE_SERIAL_PORT` | (auto-detect) | Path to the serial device (e.g. `/dev/ttyUSB0`, `COM8`). Omit to enable auto-detection. |
+| `MESHCORE_SERIAL_BAUDRATE` | `115200` | Serial baud rate. Change only if your radio firmware requires a different rate. |
+
+### TCP
+
+Use TCP when your radio is accessible over a network connection rather than a direct USB link.
+
+| Variable | Default | Description |
+|---|---|---|
+| `MESHCORE_TCP_HOST` | — | Hostname or IP address of the TCP radio. Setting this activates TCP transport. |
+| `MESHCORE_TCP_PORT` | `5000` | TCP port for the radio connection. |
+
+<Note>
+  TCP transport always forces `set_channel(...)` before every channel send because RemoteTerm cannot assume exclusive device access over a network connection. The channel-slot cache used by serial and BLE connections is not available for TCP.
+</Note>
+
+### BLE
+
+BLE transport connects to a radio over Bluetooth Low Energy. Both variables are required together.
+
+| Variable | Default | Description |
+|---|---|---|
+| `MESHCORE_BLE_ADDRESS` | — | Bluetooth device address of the radio (e.g. `AA:BB:CC:DD:EE:FF`). Setting this activates BLE transport. |
+| `MESHCORE_BLE_PIN` | — | BLE PIN code. Required whenever `MESHCORE_BLE_ADDRESS` is set. |
+
+<Warning>
+  BLE connections with large contact tables may time out during initial contact enumeration. If this happens, RemoteTerm continues on a best-effort basis but some contact adds may fail. See [`MESHCORE_LOAD_WITH_AUTOEVICT`](#remediation-variables) and the [radio connection guide](/configuration/radio-connection) for mitigation options.
+</Warning>
+
+## Application variables
+
+These variables control logging, storage, authentication, and the bot system.
+
+| Variable | Default | Description |
+|---|---|---|
+| `MESHCORE_LOG_LEVEL` | `INFO` | Log verbosity. Accepted values: `DEBUG`, `INFO`, `WARNING`, `ERROR`. Use `DEBUG` when filing bug reports. |
+| `MESHCORE_DATABASE_PATH` | `data/meshcore.db` | Path to the SQLite database file. The directory must exist before starting the server. |
+| `MESHCORE_DISABLE_BOTS` | `false` | When `true`, the bot system is completely disabled at startup. Bot execution is blocked and bot configuration changes via the API return `403`. |
+| `MESHCORE_BASIC_AUTH_USERNAME` | — | Optional HTTP Basic auth username for app-wide access control. Must be set together with `MESHCORE_BASIC_AUTH_PASSWORD`. |
+| `MESHCORE_BASIC_AUTH_PASSWORD` | — | Optional HTTP Basic auth password. Must be set together with `MESHCORE_BASIC_AUTH_USERNAME`. |
+
+<Warning>
+  Setting only one of `MESHCORE_BASIC_AUTH_USERNAME` or `MESHCORE_BASIC_AUTH_PASSWORD` causes the server to refuse to start. Both must be set together or neither should be set.
+
+  HTTP Basic credentials are transmitted in the clear over plain HTTP. Always pair Basic Auth with HTTPS. See the [HTTPS and security guide](/configuration/https-and-security).
+</Warning>
+
+## Remediation variables
+
+These variables work around radios that behave unexpectedly. They are not needed for normal operation — only enable them when troubleshooting a specific issue.
+
+| Variable | Default | Description |
+|---|---|---|
+| `MESHCORE_ENABLE_MESSAGE_POLL_FALLBACK` | `false` | Switches the background radio audit task from hourly checks to aggressive 10-second polling. Useful when messages arrive on the radio but never appear in the app. |
+| `MESHCORE_FORCE_CHANNEL_SLOT_RECONFIGURE` | `false` | Disables channel-slot reuse and forces `set_channel(...)` before every channel send on all transports. Adds ~500 ms latency per send. Use when channel sends appear to use the wrong slot or another client is mutating slots underneath RemoteTerm. |
+| `MESHCORE_LOAD_WITH_AUTOEVICT` | `false` | Enables autoevict contact loading. The radio's `AUTO_ADD_OVERWRITE_OLDEST` preference is activated so contact table adds never fail with `TABLE_FULL`. Loaded contacts are not radio-side favorites and may be evicted by new advertisements when the table is full. |
+
+<AccordionGroup>
+  <Accordion title="When to use MESHCORE_ENABLE_MESSAGE_POLL_FALLBACK">
+    By default, RemoteTerm relies on radio events and MeshCore auto-fetch for incoming messages, supplemented by a low-frequency hourly audit. The audit checks both:
+
+    - Whether messages were left on the radio without reaching the app through event subscription
+    - Whether the app's channel-slot expectations still match the radio's actual channel listing
+
+    If the audit finds a mismatch, you'll see a warning in the UI and in your logs. Enable `MESHCORE_ENABLE_MESSAGE_POLL_FALLBACK=true` to switch to aggressive 10-second safety-net polling.
+  </Accordion>
+  <Accordion title="When to use MESHCORE_FORCE_CHANNEL_SLOT_RECONFIGURE">
+    RemoteTerm normally caches channel slot assignments after startup to avoid redundant `set_channel(...)` calls on serial and BLE transports. If you see channel sends going to the wrong channel, or if another MeshCore client is changing channel slots while RemoteTerm is running, set this variable to `true` to force slot validation before every send.
+  </Accordion>
+  <Accordion title="When to use MESHCORE_LOAD_WITH_AUTOEVICT">
+    If RemoteTerm reports that it cannot load contacts because the radio contact table is full, and you cannot clear the table using another client, autoevict mode lets the radio make room automatically by removing the oldest non-favorite contact on each add. This is most useful on BLE connections where enumeration is slow and a full contact table blocks reliable loading.
+  </Accordion>
+</AccordionGroup>
+
+## Launch examples
+
+<Tabs>
+  <Tab title="Serial">
+    ```bash
+    # Auto-detect port (omit MESHCORE_SERIAL_PORT)
+    uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+    # Explicit port
+    MESHCORE_SERIAL_PORT=/dev/ttyUSB0 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+    ```
+  </Tab>
+  <Tab title="TCP">
+    ```bash
+    MESHCORE_TCP_HOST=192.168.1.100 MESHCORE_TCP_PORT=5000 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+    ```
+  </Tab>
+  <Tab title="BLE">
+    ```bash
+    MESHCORE_BLE_ADDRESS=AA:BB:CC:DD:EE:FF MESHCORE_BLE_PIN=123456 uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+    ```
+  </Tab>
+  <Tab title="Windows (PowerShell)">
+    On Windows, set environment variables as separate statements before the launch command:
+
+    ```powershell
+    $env:MESHCORE_SERIAL_PORT="COM8"
+    uv run uvicorn app.main:app --host 0.0.0.0 --port 8000
+    ```
+
+    <Warning>
+      **Windows + MQTT fanout:** Python's default Windows event loop (`ProactorEventLoop`) is incompatible with the MQTT libraries used by RemoteTerm. If you configure any MQTT integration, add `--loop none` to your uvicorn command:
+
+      ```powershell
+      uv run uvicorn app.main:app --host 0.0.0.0 --port 8000 --loop none
+      ```
+
+      If you omit this flag, the app starts normally but MQTT connections fail silently and a toast notification appears in the UI.
+    </Warning>
+  </Tab>
+</Tabs>
+
+## Runtime settings (database-stored)
+
+The following settings are **not** environment variables. They are stored in the `app_settings` database table and managed through the Settings UI or `PATCH /api/settings`.
+
+<Note>
+  Changing these settings does not require a server restart. They take effect immediately via the API or Settings UI.
+</Note>
+
+| Setting | Description |
+|---|---|
+| `max_radio_contacts` | Radio contact capacity baseline. Favorites load first; non-favorites fill to ~80% of this value; full offload triggers at ~95% occupancy. |
+| `advert_interval` | How often RemoteTerm sends an advertisement, in seconds. `0` disables automatic advertisements. |
+| `last_advert_time` | Timestamp of the last advertisement send. |
+| `flood_scope` | Default regional flood scope for channel sends. |
+| `auto_decrypt_dm_on_advert` | Whether to attempt DM decryption when a new contact advertisement is received. |
+| `auto_resend_channel` | Whether to automatically resend channel messages on failure. |
+| `blocked_keys` | List of public key prefixes whose messages are filtered from the UI. |
+| `blocked_names` | List of display names whose messages are filtered from the UI. |
+| `discovery_blocked_types` | Contact types excluded from mesh discovery results. |
+| `tracked_telemetry_repeaters` | Repeaters from which telemetry is automatically collected on a schedule. |
+| `telemetry_interval_hours` | How frequently telemetry is fetched for tracked repeaters. |
+
+MQTT, bot, webhook, Apprise, and SQS configurations are stored in the `fanout_configs` table and managed through `GET`/`POST`/`PATCH`/`DELETE /api/fanout`.
